@@ -25,9 +25,6 @@
 
 #include <stdint.h>
 
-extern bool rccl_float8_useFnuz; // runtime switch that controls which FP8 variant
-                                 // yes for gfx942; refer to common.cu:IsArchMatch()
-
 #if __cplusplus < 201103L || (!defined(__HIP_PLATFORM_AMD__) && !defined(__HIPCC__))
 /*! \brief Struct to represent a 8 bit floating-point number. */
 

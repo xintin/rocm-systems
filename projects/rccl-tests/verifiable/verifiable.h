@@ -12,6 +12,8 @@
 #include <hip/hip_version.h>
 #include <stdint.h>
 
+extern bool rccl_float8_useFnuz; // runtime switch: true for gfx942 (FNUZ), false otherwise (OCP)
+
 /* Routines for launching kernels that verify reduction results. A significant
  * feature of these routines is they carefully craft floating point input
  * to produce exactly predictable output.
