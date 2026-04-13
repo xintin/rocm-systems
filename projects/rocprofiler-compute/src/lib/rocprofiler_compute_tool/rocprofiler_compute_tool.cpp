@@ -1,130 +1,40 @@
 // Copyright (c) Advanced Micro Devices, Inc.
 // SPDX-License-Identifier:  MIT
 
-#include "dispatch_callback.h"
-#include "helper.hpp"
-#include "input_parameters.h"
 #include "rocprofiler_compute_tool.h"
 
+#include "input_parameters.h"
+#include "sdk_callbacks.h"
 #include "sdk_wrapper.h"
 
 #include <unistd.h>
 
 #include <fstream>
 #include <iostream>
-#include <mutex>
-#include <set>
-#include <shared_mutex>
-#include <sstream>
-#include <string>
-#include <unordered_map>
-#include <vector>
 
-using namespace rocprof_compute_tool;
+using namespace rocprofiler_compute_tool;
 
 std::shared_ptr<InputParameters> g_input_parameters = std::make_shared<EnvInputParameters>();
+std::shared_ptr<SdkWrapper>      g_sdk_wrapper      = std::make_shared<SdkWrapperImpl>();
+std::shared_ptr<SdkCallbacks> g_sdk_callbacks = std::make_shared<SdkCallbacksImpl>(g_sdk_wrapper);
 
-void test_knobs::set_input_parameters(std::shared_ptr<InputParameters> input_parameters)
+void test_knobs::set_input_parameters(const std::shared_ptr<InputParameters>& input_parameters)
 {
     g_input_parameters = input_parameters;
 }
 
+void test_knobs::set_sdk_callbacks(const std::shared_ptr<SdkCallbacks>& sdk_callbacks)
+{
+    g_sdk_callbacks = sdk_callbacks;
+}
 
-#define ROCPROFILER_CALL(result, msg)                                                                  \
-    {                                                                                                  \
-        rocprofiler_status_t CHECKSTATUS = result;                                                     \
-        if (CHECKSTATUS != ROCPROFILER_STATUS_SUCCESS)                                                 \
-        {                                                                                              \
-            std::string status_msg = rocprofiler_get_status_string(CHECKSTATUS);                       \
-            std::cerr << "[" #result "][" << __FILE__ << ":" << __LINE__ << "] " << msg                \
-                      << " failed with error code " << CHECKSTATUS << ": " << status_msg << std::endl; \
-            std::stringstream errmsg{};                                                                \
-            errmsg << "[" #result "][" << __FILE__ << ":" << __LINE__ << "] " << msg " failure ("      \
-                   << status_msg << ")";                                                               \
-            throw std::runtime_error(errmsg.str());                                                    \
-        }                                                                                              \
-    }
+void test_knobs::set_sdk_wrapper(const std::shared_ptr<SdkWrapper>& sdk_wrapper)
+{
+    g_sdk_wrapper = sdk_wrapper;
+}
 
 namespace
 {
-
-enum class iteration_multiplexing_mode_t
-{
-    DISABLED,
-    SIMPLE,
-    KERNEL,
-    LAUNCH
-};
-
-// Kernel dispatch info struct for iteration multiplexing
-struct kernel_dispatch_info_t
-{
-    uint64_t           kernel_id;
-    uint64_t           queue_id;
-    rocprofiler_dim3_t workgroup_size;
-    rocprofiler_dim3_t grid_size;
-    uint32_t           LDS_memory_size;
-
-    // Overload operator< for strict weak ordering
-    bool operator<(const kernel_dispatch_info_t other) const
-    {
-        // Compare based on kernel_id first, then queue_id, then workgroup_size,
-        // then grid_size, and finally LDS_memory_size
-        return std::tie(kernel_id,
-                        queue_id,
-                        workgroup_size.x,
-                        workgroup_size.y,
-                        workgroup_size.z,
-                        grid_size.x,
-                        grid_size.y,
-                        grid_size.z,
-                        LDS_memory_size) < std::tie(other.kernel_id,
-                                                    other.queue_id,
-                                                    other.workgroup_size.x,
-                                                    other.workgroup_size.y,
-                                                    other.workgroup_size.z,
-                                                    other.grid_size.x,
-                                                    other.grid_size.y,
-                                                    other.grid_size.z,
-                                                    other.LDS_memory_size);
-    }
-};
-
-// Iteration multiplexing data struct
-struct iteration_multiplexing_dispatch_record_t
-{
-    std::size_t                                   config;
-    std::map<uint64_t, std::size_t>               kernel_config;
-    std::map<kernel_dispatch_info_t, std::size_t> dispatch_config;
-};
-
-// Struct to store a single counter info record
-struct counter_info_record_t
-{
-    uint64_t    dispatch_id;
-    uint64_t    agent_id;
-    uint64_t    kernel_id;
-    uint32_t    LDS_memory_size;
-    uint64_t    counter_id;
-    std::string counter_name;
-    double      counter_value;
-};
-
-// Tool data struct, now includes a vector of counter_info_record_t
-struct tool_data_t
-{
-    std::mutex                                 mut{};
-    std::string                                output_filename{};
-    std::unordered_map<uint64_t, std::string>  counter_id_name_map{};
-    std::string                                requested_counters{};
-    std::string                                kernel_filter_include_regex{};
-    std::vector<std::pair<uint64_t, uint64_t>> kernel_filter_ranges{};
-    std::vector<counter_info_record_t>         counter_records;
-    std::set<uint64_t>                         target_kernel_ids{};
-    iteration_multiplexing_mode_t iteration_multiplexing_mode{iteration_multiplexing_mode_t::DISABLED};
-};
-
-using kernel_symbol_data_t = rocprofiler_callback_tracing_code_object_kernel_symbol_register_data_t;
 
 rocprofiler_context_id_t& get_client_ctx()
 {
@@ -142,142 +52,47 @@ iteration_multiplexing_mode_t iteration_multiplexing_mode(const std::string& mod
         return iteration_multiplexing_mode_t::DISABLED;
 }
 
+void dispatch_callback(rocprofiler_dispatch_counting_service_data_t dispatch_data,
+                       rocprofiler_counter_config_id_t*             config,
+                       rocprofiler_user_data_t* /*user_data*/,
+                       void* callback_data_args)
+{
+    g_sdk_callbacks->dispatch_callback(dispatch_data, config, callback_data_args);
+}
+
 void record_callback(rocprofiler_dispatch_counting_service_data_t dispatch_data,
                      rocprofiler_counter_record_t*                record_data,
                      size_t                                       record_count,
                      rocprofiler_user_data_t /* user_data */,
                      void* callback_data_args)
 {
-    auto*        tool_data_ptr = static_cast<std::unique_ptr<tool_data_t>*>(callback_data_args);
-    tool_data_t* tool;
-    {
-        std::lock_guard<std::mutex> lock(tool_data_ptr->get()->mut);
-        tool = tool_data_ptr->get();
-    }
-
-    // For each counter, write: dispatch_id, counter_id, counter_name,
-    // counter_value
-    for (size_t i = 0; i < record_count; ++i)
-    {
-        rocprofiler_counter_id_t counter_id{};
-        ROCPROFILER_CALL(rocprofiler_query_record_counter_id(record_data[i].id, &counter_id),
-                         "query record counter id");
-
-        // Store the counter info record in tool_data
-        counter_info_record_t record{dispatch_data.dispatch_info.dispatch_id,
-                                     dispatch_data.dispatch_info.agent_id.handle,
-                                     dispatch_data.dispatch_info.kernel_id,
-                                     dispatch_data.dispatch_info.group_segment_size,
-                                     counter_id.handle,
-                                     tool->counter_id_name_map[counter_id.handle],
-                                     record_data[i].counter_value};
-        {
-            std::lock_guard<std::mutex> lock(tool->mut);
-            tool->counter_records.push_back(std::move(record));
-        }
-    }
+    g_sdk_callbacks->record_callback(dispatch_data, record_data, record_count, callback_data_args);
 }
 
-/**
- * Callback from rocprofiler when a code object is loaded.
- * We use this to get record kernel names as they are registered.
- */
 void tool_tracing_callback(rocprofiler_callback_tracing_record_t record,
                            rocprofiler_user_data_t* /*user_data*/,
                            void* callback_data)
 {
-    if (record.phase == ROCPROFILER_CALLBACK_PHASE_LOAD &&
-        record.kind == ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT &&
-        record.operation == ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER)
-    {
-        auto* data            = static_cast<kernel_symbol_data_t*>(record.payload);
-        int   demangle_status = 0;
-        auto  kernel_name     = helper_utils::cxa_demangle(data->kernel_name, &demangle_status);
-        kernel_name           = helper_utils::truncate_name(kernel_name);
-
-        // check if regex can be found in kernel name matches regex from tool data,
-        // if matches store kernel id
-        auto* tool_data_ptr = static_cast<std::unique_ptr<tool_data_t>*>(callback_data);
-        auto* tool          = tool_data_ptr->get();
-        // Lock before modifying target_kernel_ids
-        std::lock_guard<std::mutex> lock(tool->mut);
-        if (!tool->kernel_filter_include_regex.empty())
-        {
-            try
-            {
-                std::regex re(tool->kernel_filter_include_regex);
-                if (!kernel_name.empty() && std::regex_search(kernel_name, re))
-                {
-                    tool->target_kernel_ids.insert(data->kernel_id);
-                }
-            }
-            catch (const std::regex_error& e)
-            {
-                std::cerr << "[rocprofiler-compute] [" << __FUNCTION__
-                          << "] ERROR: Invalid regex in ROCPROF_KERNEL_FILTER_INCLUDE_REGEX: "
-                          << tool->kernel_filter_include_regex << " : " << e.what() << std::endl;
-            }
-        }
-        // If no regex specified, collect for all kernels
-        else
-        {
-            tool->target_kernel_ids.insert(data->kernel_id);
-        }
-    }
-}
-
-/**
- * Checks if the given kernel dispatch should be targeted for profiling.
- * Returns true if the kernel_id is in the set of target_kernel_ids (if
- * non-empty), and if the kernel_iteration (1-based index) matches the
- * kernel_filter_range (if specified).
- *
- * @param tool Pointer to the tool_data_t structure containing profiling
- * configuration.
- * @param kernel_id The kernel ID of the dispatch.
- * @param kernel_iteration The 1-based index of this kernel_id's dispatch (first
- * dispatch is 1).
- * @return true if the dispatch should be profiled, false otherwise.
- */
-bool is_targetted_dispatch(const tool_data_t* tool, uint64_t kernel_id, uint64_t kernel_iteration)
-{
-    // If target_kernel_ids is non-empty, only allow those kernel_ids
-    if (!tool->target_kernel_ids.empty() && !tool->target_kernel_ids.count(kernel_id))
-        return false;
-
-    // If kernel_filter_ranges is set, check if kernel_iteration is in any of the
-    // specified ranges
-    if (!tool->kernel_filter_ranges.empty())
-        return std::any_of(tool->kernel_filter_ranges.begin(),
-                           tool->kernel_filter_ranges.end(),
-                           [kernel_iteration](const auto& range) {
-                               return kernel_iteration >= range.first && kernel_iteration <= range.second;
-                           });
-
-    // If no filter ranges are specified, or all checks passed, profile this
-    // dispatch
-    return true;
+    g_sdk_callbacks->tool_tracing_callback(record, callback_data);
 }
 
 int tool_init(rocprofiler_client_finalize_t, void* user_data)
 {
     std::clog << "[rocprofiler-compute] In tool init\n";
-    ROCPROFILER_CALL(rocprofiler_create_context(&get_client_ctx()), "context creation");
+    g_sdk_wrapper->create_context(&get_client_ctx());
 
-    ROCPROFILER_CALL(rocprofiler_configure_callback_dispatch_counting_service(get_client_ctx(),
-                                                                              dispatch_callback,
-                                                                              user_data,
-                                                                              record_callback,
-                                                                              user_data),
-                     "setup counting service");
-    ROCPROFILER_CALL(rocprofiler_configure_callback_tracing_service(get_client_ctx(),
-                                                                    ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT,
-                                                                    nullptr,
-                                                                    0,
-                                                                    tool_tracing_callback,
-                                                                    user_data),
-                     "setup code object tracing service");
-    ROCPROFILER_CALL(rocprofiler_start_context(get_client_ctx()), "start context");
+    g_sdk_wrapper->configure_callback_dispatch_counting_service(get_client_ctx(),
+                                                                dispatch_callback,
+                                                                user_data,
+                                                                record_callback,
+                                                                user_data);
+    g_sdk_wrapper->configure_callback_tracing_service(get_client_ctx(),
+                                                      ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT,
+                                                      nullptr,
+                                                      0,
+                                                      tool_tracing_callback,
+                                                      user_data);
+    g_sdk_wrapper->start_context(get_client_ctx());
 
     return 0;
 }
