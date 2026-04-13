@@ -9,7 +9,7 @@
 #define _d41d8cd98f00b204e9800998ecf8427e
 
 #include <cuda_runtime.h>
-
+#include <hip/hip_version.h>
 #include <stdint.h>
 
 /* Routines for launching kernels that verify reduction results. A significant
