@@ -377,6 +377,14 @@ hsa_status_t Runtime::FreeMemory(void* ptr) {
     allocation_map_.erase(it);
   }
 
+  // Remove IPC socket server connection entry if this memory was exported via IPC.
+  // This prevents stale entries in ipc_sock_server_conns_ which can cause memory leaks
+  // when hipIpcGetMemHandle is called but the memory is freed before import.
+  {
+    std::lock_guard<std::mutex> lock(ipc_sock_server_lock_);
+    ipc_sock_server_conns_.erase(reinterpret_cast<uint64_t>(ptr));
+  }
+
   // Notifiers can't run while holding the lock or the callback won't be able to manage memory.
   // The memory triggering the notification has already been removed from the memory map so can't
   // be double released during the callback.
