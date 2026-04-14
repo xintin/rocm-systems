@@ -58,47 +58,6 @@ TABLE_NAME_PREFIX_QUERY = (
 INSERT_QUERY = "INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
 
 
-def convert_dbs_to_csv(
-    db_paths: list[str],
-    counter_collection_csv_path: str,
-    marker_trace_csv_path: str,
-) -> None:
-    queries = {
-        counter_collection_csv_path: COUNTERS_COLLECTION_QUERY,
-        marker_trace_csv_path: MARKER_API_TRACE_QUERY,
-    }
-    header_written = {path: False for path in queries}
-
-    with ExitStack() as stack:
-        writers = {
-            path: csv.writer(stack.enter_context(open(path, "w", newline="")))
-            for path in queries
-        }
-        for db_path in db_paths:
-            with closing(sqlite3.connect(db_path)) as conn:
-                for file_path, query in queries.items():
-                    try:
-                        with closing(conn.execute(query)) as cursor:
-                            if cursor.description is None:
-                                continue
-                            if not header_written[file_path]:
-                                writers[file_path].writerow([
-                                    desc[0] for desc in cursor.description
-                                ])
-                                header_written[file_path] = True
-                            writers[file_path].writerows(cursor)
-                    except OSError as e:
-                        console_error(
-                            f"Database error while extracting {file_path} "
-                            f"from {db_path}: {e}"
-                        )
-                    except Exception as e:
-                        console_error(
-                            f"Unexpected error while extracting {file_path} "
-                            f"from {db_path}: {e}"
-                        )
-
-
 def _assign_counter_ids(
     row: tuple,
     column_positions: dict[str, int],
