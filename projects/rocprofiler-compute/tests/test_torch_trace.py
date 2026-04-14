@@ -183,9 +183,7 @@ def test_counter_csv_has_correlation_id_from_stack_id():
     results_csv = str(Path(workload_dir) / "results.csv")
 
     db_path = create_rocpd_test_db(workload_dir)
-    export_counters_and_markers(
-        [db_path], counter_csv, marker_csv, results_csv
-    )
+    export_counters_and_markers([db_path], counter_csv, marker_csv, results_csv)
 
     df = pd.read_csv(counter_csv)
     assert "Correlation_Id" in df.columns
@@ -206,9 +204,7 @@ def test_marker_csv_has_correlation_id_from_stack_id():
     results_csv = str(Path(workload_dir) / "results.csv")
 
     db_path = create_rocpd_test_db(workload_dir)
-    export_counters_and_markers(
-        [db_path], counter_csv, marker_csv, results_csv
-    )
+    export_counters_and_markers([db_path], counter_csv, marker_csv, results_csv)
 
     df = pd.read_csv(marker_csv)
     assert "Correlation_Id" in df.columns
