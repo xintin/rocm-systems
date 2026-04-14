@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -212,14 +213,28 @@ std::string print_unsigned_int(T value) {
 
 template <typename T, size_t N>
 void print_metric_array(const std::string& label, const T (&values)[N]) {
+  constexpr auto sentinel = std::numeric_limits<T>::max();
   std::cout << "\t" << label << " = [";
   for (size_t i = 0; i < N; ++i) {
-    std::cout << values[i];
+    if (values[i] == sentinel) {
+      std::cout << "N/A";
+    } else {
+      std::cout << values[i];
+    }
     if (i + 1 != N) {
       std::cout << ", ";
     }
   }
   std::cout << "]\n";
+}
+
+// APU metrics version detection helpers
+static constexpr bool is_apu_metrics_v24(const amd_metrics_table_header_t& header) {
+  return header.format_revision == 2 && header.content_revision == 4;
+}
+
+static constexpr bool is_apu_metrics_v30(const amd_metrics_table_header_t& header) {
+  return header.format_revision == 3 && header.content_revision == 0;
 }
 
 static void print_apu_metrics_info(const amdsmi_gpu_metrics_t& smu) {
@@ -228,12 +243,9 @@ static void print_apu_metrics_info(const amdsmi_gpu_metrics_t& smu) {
   }
 
   const auto& apu = *smu.apu_metrics;
-  const bool is_v24 =
-      smu.common_header.format_revision == 2 && smu.common_header.content_revision == 4;
-  const bool is_v30 =
-      smu.common_header.format_revision == 3 && smu.common_header.content_revision == 0;
+  const bool is_v24 = is_apu_metrics_v24(smu.common_header);
+  const bool is_v30 = is_apu_metrics_v30(smu.common_header);
 
-  const size_t core_count = is_v24 ? 8 : AMDSMI_APU_MAX_CORES;
   const size_t l3_count = is_v24 ? AMDSMI_APU_MAX_L3 : 0;
 
   std::cout << "\nAPU AUXILIARY METRICS:\n";

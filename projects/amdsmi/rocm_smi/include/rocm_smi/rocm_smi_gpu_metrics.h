@@ -876,8 +876,8 @@ struct AMDApuMetrics_v24_t {
   /* Temperature (unit: centi-Celsius) */
   uint16_t m_temperature_gfx;
   uint16_t m_temperature_soc;
-  uint16_t m_temperature_core[8];
-  uint16_t m_temperature_l3[2];
+  uint16_t m_temperature_core[RSMI_APU_V24_CORES];
+  uint16_t m_temperature_l3[RSMI_APU_MAX_L3];
 
   /* Utilization (unit: centi) */
   uint16_t m_average_gfx_activity;
@@ -891,7 +891,7 @@ struct AMDApuMetrics_v24_t {
   uint16_t m_average_cpu_power;
   uint16_t m_average_soc_power;
   uint16_t m_average_gfx_power;
-  uint16_t m_average_core_power[8];
+  uint16_t m_average_core_power[RSMI_APU_V24_CORES];
 
   /* Average clocks (unit: MHz) */
   uint16_t m_average_gfxclk_frequency;
@@ -908,8 +908,8 @@ struct AMDApuMetrics_v24_t {
   uint16_t m_current_fclk;
   uint16_t m_current_vclk;
   uint16_t m_current_dclk;
-  uint16_t m_current_coreclk[8];
-  uint16_t m_current_l3clk[2];
+  uint16_t m_current_coreclk[RSMI_APU_V24_CORES];
+  uint16_t m_current_l3clk[RSMI_APU_MAX_L3];
 
   /* Throttle status (ASIC dependent) */
   uint32_t m_throttle_status;
@@ -925,8 +925,8 @@ struct AMDApuMetrics_v24_t {
   /* Average Temperature (unit: centi-Celsius) */
   uint16_t m_average_temperature_gfx;
   uint16_t m_average_temperature_soc;
-  uint16_t m_average_temperature_core[8];
-  uint16_t m_average_temperature_l3[2];
+  uint16_t m_average_temperature_core[RSMI_APU_V24_CORES];
+  uint16_t m_average_temperature_l3[RSMI_APU_MAX_L3];
 
   /* Power/Voltage (unit: mV) */
   uint16_t m_average_cpu_voltage;
@@ -946,14 +946,14 @@ struct AMDApuMetrics_v30_t {
   /* Temperature */
   uint16_t m_temperature_gfx;
   uint16_t m_temperature_soc;
-  uint16_t m_temperature_core[16];
+  uint16_t m_temperature_core[RSMI_APU_MAX_CORES];
   uint16_t m_temperature_skin;
 
   /* Utilization */
   uint16_t m_average_gfx_activity;
   uint16_t m_average_vcn_activity;
-  uint16_t m_average_ipu_activity[8];
-  uint16_t m_average_core_c0_activity[16];
+  uint16_t m_average_ipu_activity[RSMI_APU_MAX_IPU];
+  uint16_t m_average_core_c0_activity[RSMI_APU_MAX_CORES];
   uint16_t m_average_dram_reads;
   uint16_t m_average_dram_writes;
   uint16_t m_average_ipu_reads;
@@ -969,7 +969,7 @@ struct AMDApuMetrics_v30_t {
   uint32_t m_average_gfx_power;
   uint32_t m_average_dgpu_power;
   uint32_t m_average_all_core_power;
-  uint16_t m_average_core_power[16];
+  uint16_t m_average_core_power[RSMI_APU_MAX_CORES];
   uint16_t m_average_sys_power;
   uint16_t m_stapm_power_limit;
   uint16_t m_current_stapm_power_limit;
@@ -985,7 +985,7 @@ struct AMDApuMetrics_v30_t {
   uint16_t m_average_mpipu_frequency;
 
   /* Current clocks */
-  uint16_t m_current_coreclk[16];
+  uint16_t m_current_coreclk[RSMI_APU_MAX_CORES];
   uint16_t m_current_core_maxfreq;
   uint16_t m_current_gfx_maxfreq;
 
@@ -1073,7 +1073,7 @@ using GPUMetricCurrDClkTbl_t = GpuMetricU16Tbl_t;
       - AMDGpuMetrics_v1X_t structure in question
       - populate_metrics_dynamic_tbl()
       - copy_internal_to_external_metrics()
-      - init_max_public_gpu_matrics()
+      - init_max_public_gpu_metrics()
 */
 
 using AMDGpuMetricTypeId_t = uint32_t;
@@ -1147,8 +1147,8 @@ enum class AMDGpuMetricsUnitType_t : AMDGpuMetricTypeId_t {
   kMetricAvgMmActivity,
   kMetricGfxActivityAccumulator,
   kMetricMemActivityAccumulator,
-  kMetricVcnActivity,   // v1.4
-  kMetricJpegActivity,  // v1.5
+  kMetricVcnActivity,        // v1.4
+  kMetricJpegActivity,       // v1.5
   kMetricAvgIpuActivity,     // APU: v3_0[8]
   kMetricAvgCoreC0Activity,  // APU: v3_0[16]
   kMetricAvgDramReads,       // APU: v3_0
@@ -1177,11 +1177,11 @@ enum class AMDGpuMetricsUnitType_t : AMDGpuMetricTypeId_t {
   kMetricCurrDClock0,  // v1.4: Changed to multi-valued
   kMetricCurrVClock1,
   kMetricCurrDClock1,
-  kMetricCurrFClock,             // APU: v2_4
-  kMetricCurrCoreClock,          // APU: v2_4[8], v3_0[16]
-  kMetricCurrL3Clock,            // APU: v2_4[2]
-  kMetricCurrCoreMaxFrequency,   // APU: v3_0
-  kMetricCurrGfxMaxFrequency,    // APU: v3_0
+  kMetricCurrFClock,            // APU: v2_4
+  kMetricCurrCoreClock,         // APU: v2_4[8], v3_0[16]
+  kMetricCurrL3Clock,           // APU: v2_4[2]
+  kMetricCurrCoreMaxFrequency,  // APU: v3_0
+  kMetricCurrGfxMaxFrequency,   // APU: v3_0
 
   // kGpuMetricThrottleStatus counters
   kMetricThrottleStatus,
@@ -1211,8 +1211,8 @@ enum class AMDGpuMetricsUnitType_t : AMDGpuMetricTypeId_t {
 
   // kGpuMetricPowerEnergy counters
   kMetricAvgSocketPower,
-  kMetricCurrSocketPower,    // v1.4
-  kMetricEnergyAccumulator,  // v1.4
+  kMetricCurrSocketPower,         // v1.4
+  kMetricEnergyAccumulator,       // v1.4
   kMetricAvgCpuPower,             // APU: v2_4
   kMetricAvgSocPower,             // APU: v2_4
   kMetricAvgGfxPower,             // APU: v2_4, v3_0
@@ -1226,9 +1226,9 @@ enum class AMDGpuMetricsUnitType_t : AMDGpuMetricTypeId_t {
   kMetricCurrentStapmPowerLimit,  // APU: v3_0
 
   // kGpuMetricVoltage counters
-  kMetricVoltageSoc,  // v1.3
-  kMetricVoltageGfx,  // v1.3
-  kMetricVoltageMem,  // v1.3
+  kMetricVoltageSoc,     // v1.3
+  kMetricVoltageGfx,     // v1.3
+  kMetricVoltageMem,     // v1.3
   kMetricAvgCpuVoltage,  // APU: v2_4
   kMetricAvgSocVoltage,  // APU: v2_4
   kMetricAvgGfxVoltage,  // APU: v2_4
@@ -1248,13 +1248,13 @@ enum class AMDGpuMetricsUnitType_t : AMDGpuMetricTypeId_t {
   kMetricSocketThmResidencyAccumulator,  // v1.6
   kMetricVRThmResidencyAccumulator,      // v1.6
   kMetricHBMThmResidencyAccumulator,     // v1.6
-  kMetricThrottleResidencyProchot,  // APU: v3_0
-  kMetricThrottleResidencySpl,      // APU: v3_0
-  kMetricThrottleResidencyFppt,     // APU: v3_0
-  kMetricThrottleResidencySppt,     // APU: v3_0
-  kMetricThrottleResidencyThmCore,  // APU: v3_0
-  kMetricThrottleResidencyThmGfx,   // APU: v3_0
-  kMetricThrottleResidencyThmSoc,   // APU: v3_0
+  kMetricThrottleResidencyProchot,       // APU: v3_0
+  kMetricThrottleResidencySpl,           // APU: v3_0
+  kMetricThrottleResidencyFppt,          // APU: v3_0
+  kMetricThrottleResidencySppt,          // APU: v3_0
+  kMetricThrottleResidencyThmCore,       // APU: v3_0
+  kMetricThrottleResidencyThmGfx,        // APU: v3_0
+  kMetricThrottleResidencyThmSoc,        // APU: v3_0
 
   // kGpuMetricPartition
   kGpuMetricNumPartition,  // v1.6
@@ -1313,11 +1313,11 @@ enum class AMDGpuMetricVersionFlags_t : AMDGpuMetricVersionFlagId_t {
   kGpuMetricV16 = (0x1 << 6),
   kGpuMetricV17 = (0x1 << 7),
   kGpuMetricV18 = (0x1 << 8),
-  kGpuXcpMetricV10 = (0x1 << 0),            // Added in v1.8 for partition metrics v1.0
-  kGpuMetricDynV19Plus = (0x1 << 9),        // Dyn. GPU Metrics v1.9+
-  kGpuXcpMetricDynV11Plus = (0x1 << 1),     // Added in v1.9 for Dyn. partition metrics v1.1+
-  kApuMetricV24 = (0x1 << 10),              // APU Metrics v2_4
-  kApuMetricV30 = (0x1 << 11),              // APU Metrics v3_0
+  kGpuXcpMetricV10 = (0x1 << 0),         // Added in v1.8 for partition metrics v1.0
+  kGpuMetricDynV19Plus = (0x1 << 9),     // Dyn. GPU Metrics v1.9+
+  kGpuXcpMetricDynV11Plus = (0x1 << 1),  // Added in v1.9 for Dyn. partition metrics v1.1+
+  kApuMetricV24 = (0x1 << 10),           // APU Metrics v2_4
+  kApuMetricV30 = (0x1 << 11),           // APU Metrics v3_0
 };
 using AMDGpuMetricVersionTranslationTbl_t = std::map<uint16_t, AMDGpuMetricVersionFlags_t>;
 using GpuMetricTypePtr_t = std::shared_ptr<void>;
@@ -1645,7 +1645,6 @@ class ApuMetricsBase_v30_t final : public GpuMetricsBase_t {
   std::shared_ptr<AMDApuMetrics_v30_t> m_apu_metric_v30_ptr;
   rsmi_apu_metrics_t m_apu_metrics_tbl;
 };
-
 
 class GpuMetricsBaseDynamic_t final : public GpuMetricsBase_t {
  public:

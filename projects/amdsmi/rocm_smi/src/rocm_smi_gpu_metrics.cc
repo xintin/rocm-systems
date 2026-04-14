@@ -34,8 +34,8 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
-#include <map>
 #include <limits>
+#include <map>
 #include <regex>  // NOLINT
 #include <string>
 #include <tuple>
@@ -80,6 +80,23 @@ AMDGpuMetricsHeader_v1_t disjoin_metrics_version(uint16_t version) {
   metrics_header.m_content_revision = static_cast<uint8_t>(version & 0x00FF);
 
   return metrics_header;
+}
+
+// APU metrics version detection helpers
+constexpr bool is_apu_metrics_v24(uint8_t format_rev, uint8_t content_rev) {
+  return format_rev == 2 && content_rev == 4;
+}
+
+constexpr bool is_apu_metrics_v30(uint8_t format_rev, uint8_t content_rev) {
+  return format_rev == 3 && content_rev == 0;
+}
+
+constexpr bool is_apu_metrics_v24(const AMDGpuMetricsHeader_v1_t& header) {
+  return is_apu_metrics_v24(header.m_format_revision, header.m_content_revision);
+}
+
+constexpr bool is_apu_metrics_v30(const AMDGpuMetricsHeader_v1_t& header) {
+  return is_apu_metrics_v30(header.m_format_revision, header.m_content_revision);
 }
 
 uint64_t actual_timestamp_in_secs() {
@@ -143,9 +160,10 @@ const AMDGpuMetricVersionTranslationTbl_t amdgpu_metric_version_translation_tabl
     {join_metrics_version(1, 6), AMDGpuMetricVersionFlags_t::kGpuMetricV16},
     {join_metrics_version(1, 7), AMDGpuMetricVersionFlags_t::kGpuMetricV17},
     {join_metrics_version(1, 8), AMDGpuMetricVersionFlags_t::kGpuMetricV18},
-    {join_metrics_version(1, 9), AMDGpuMetricVersionFlags_t::kGpuMetricDynV19Plus},     // Dynamic GPU Metrics v1.9+
-    {join_metrics_version(2, 4), AMDGpuMetricVersionFlags_t::kApuMetricV24},           // APU Metrics v2.4
-    {join_metrics_version(3, 0), AMDGpuMetricVersionFlags_t::kApuMetricV30},           // APU Metrics v3.0
+    {join_metrics_version(1, 9),
+     AMDGpuMetricVersionFlags_t::kGpuMetricDynV19Plus},  // Dynamic GPU Metrics v1.9+
+    {join_metrics_version(2, 4), AMDGpuMetricVersionFlags_t::kApuMetricV24},  // APU Metrics v2.4
+    {join_metrics_version(3, 0), AMDGpuMetricVersionFlags_t::kApuMetricV30},  // APU Metrics v3.0
 };
 
 //  version 1.0: 256
@@ -867,8 +885,8 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
         std::make_pair(unit_type, format_metric_row(metric, metric_name)));
   };
   auto populate_metrics_array_table = [&](AMDGpuMetricsClassId_t class_id,
-                                          AMDGpuMetricsUnitType_t unit_type,
-                                          const auto& metric, const std::string& metric_name) {
+                                          AMDGpuMetricsUnitType_t unit_type, const auto& metric,
+                                          const std::string& metric_name) {
     using value_type = std::remove_cv_t<std::remove_reference_t<decltype(metric[0])>>;
     AMDGpuDynamicMetricTblValues_t values;
     values.reserve(std::size(metric));
@@ -890,8 +908,7 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
       value.m_original_type = original_type;
       values.emplace_back(std::move(value));
     }
-    m_metrics_dynamic_tbl[class_id].insert(
-        std::make_pair(unit_type, std::move(values)));
+    m_metrics_dynamic_tbl[class_id].insert(std::make_pair(unit_type, std::move(values)));
   };
 
   if (get_gpu_metrics_version_used() == AMDGpuMetricVersionFlags_t::kApuMetricV24) {
@@ -921,14 +938,14 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                            AMDGpuMetricsUnitType_t::kMetricAvgSocketPower,
                            metrics.m_average_socket_power, "average_socket_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgCpuPower,
-                           metrics.m_average_cpu_power, "average_cpu_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgCpuPower, metrics.m_average_cpu_power,
+                           "average_cpu_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgSocPower,
-                           metrics.m_average_soc_power, "average_soc_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgSocPower, metrics.m_average_soc_power,
+                           "average_soc_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgGfxPower,
-                           metrics.m_average_gfx_power, "average_gfx_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgGfxPower, metrics.m_average_gfx_power,
+                           "average_gfx_power");
     populate_metrics_array_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
                                  AMDGpuMetricsUnitType_t::kMetricAvgCorePower,
                                  metrics.m_average_core_power, "average_core_power");
@@ -953,23 +970,23 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                            metrics.m_average_dclk_frequency, "average_dclk_frequency");
     // APU v2_4 current clock fields
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
-                           AMDGpuMetricsUnitType_t::kMetricCurrGfxClock,
-                           metrics.m_current_gfxclk, "current_gfxclk");
+                           AMDGpuMetricsUnitType_t::kMetricCurrGfxClock, metrics.m_current_gfxclk,
+                           "current_gfxclk");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
-                           AMDGpuMetricsUnitType_t::kMetricCurrSocClock,
-                           metrics.m_current_socclk, "current_socclk");
+                           AMDGpuMetricsUnitType_t::kMetricCurrSocClock, metrics.m_current_socclk,
+                           "current_socclk");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
-                           AMDGpuMetricsUnitType_t::kMetricCurrUClock,
-                           metrics.m_current_uclk, "current_uclk");
+                           AMDGpuMetricsUnitType_t::kMetricCurrUClock, metrics.m_current_uclk,
+                           "current_uclk");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
-                           AMDGpuMetricsUnitType_t::kMetricCurrFClock,
-                           metrics.m_current_fclk, "current_fclk");
+                           AMDGpuMetricsUnitType_t::kMetricCurrFClock, metrics.m_current_fclk,
+                           "current_fclk");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
-                           AMDGpuMetricsUnitType_t::kMetricCurrVClock0,
-                           metrics.m_current_vclk, "current_vclk");
+                           AMDGpuMetricsUnitType_t::kMetricCurrVClock0, metrics.m_current_vclk,
+                           "current_vclk");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
-                           AMDGpuMetricsUnitType_t::kMetricCurrDClock0,
-                           metrics.m_current_dclk, "current_dclk");
+                           AMDGpuMetricsUnitType_t::kMetricCurrDClock0, metrics.m_current_dclk,
+                           "current_dclk");
     populate_metrics_array_table(AMDGpuMetricsClassId_t::kGpuMetricCurrentClock,
                                  AMDGpuMetricsUnitType_t::kMetricCurrCoreClock,
                                  metrics.m_current_coreclk, "current_coreclk");
@@ -993,8 +1010,7 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                            metrics.m_average_temperature_soc, "average_temperature_soc");
     populate_metrics_array_table(AMDGpuMetricsClassId_t::kGpuMetricTemperature,
                                  AMDGpuMetricsUnitType_t::kMetricAvgTempCore,
-                                 metrics.m_average_temperature_core,
-                                 "average_temperature_core");
+                                 metrics.m_average_temperature_core, "average_temperature_core");
     populate_metrics_array_table(AMDGpuMetricsClassId_t::kGpuMetricTemperature,
                                  AMDGpuMetricsUnitType_t::kMetricAvgTempL3,
                                  metrics.m_average_temperature_l3, "average_temperature_l3");
@@ -1046,8 +1062,7 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                                  metrics.m_average_ipu_activity, "average_ipu_activity");
     populate_metrics_array_table(AMDGpuMetricsClassId_t::kGpuMetricUtilization,
                                  AMDGpuMetricsUnitType_t::kMetricAvgCoreC0Activity,
-                                 metrics.m_average_core_c0_activity,
-                                 "average_core_c0_activity");
+                                 metrics.m_average_core_c0_activity, "average_core_c0_activity");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricUtilization,
                            AMDGpuMetricsUnitType_t::kMetricAvgDramReads,
                            metrics.m_average_dram_reads, "average_dram_reads");
@@ -1055,8 +1070,8 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                            AMDGpuMetricsUnitType_t::kMetricAvgDramWrites,
                            metrics.m_average_dram_writes, "average_dram_writes");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricUtilization,
-                           AMDGpuMetricsUnitType_t::kMetricAvgIpuReads,
-                           metrics.m_average_ipu_reads, "average_ipu_reads");
+                           AMDGpuMetricsUnitType_t::kMetricAvgIpuReads, metrics.m_average_ipu_reads,
+                           "average_ipu_reads");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricUtilization,
                            AMDGpuMetricsUnitType_t::kMetricAvgIpuWrites,
                            metrics.m_average_ipu_writes, "average_ipu_writes");
@@ -1065,14 +1080,14 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                            AMDGpuMetricsUnitType_t::kMetricAvgSocketPower,
                            metrics.m_average_socket_power, "average_socket_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgIpuPower,
-                           metrics.m_average_ipu_power, "average_ipu_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgIpuPower, metrics.m_average_ipu_power,
+                           "average_ipu_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgApuPower,
-                           metrics.m_average_apu_power, "average_apu_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgApuPower, metrics.m_average_apu_power,
+                           "average_apu_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgGfxPower,
-                           metrics.m_average_gfx_power, "average_gfx_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgGfxPower, metrics.m_average_gfx_power,
+                           "average_gfx_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
                            AMDGpuMetricsUnitType_t::kMetricAvgDgpuPower,
                            metrics.m_average_dgpu_power, "average_dgpu_power");
@@ -1083,15 +1098,14 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                                  AMDGpuMetricsUnitType_t::kMetricAvgCorePower,
                                  metrics.m_average_core_power, "average_core_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
-                           AMDGpuMetricsUnitType_t::kMetricAvgSysPower,
-                           metrics.m_average_sys_power, "average_sys_power");
+                           AMDGpuMetricsUnitType_t::kMetricAvgSysPower, metrics.m_average_sys_power,
+                           "average_sys_power");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
                            AMDGpuMetricsUnitType_t::kMetricStapmPowerLimit,
                            metrics.m_stapm_power_limit, "stapm_power_limit");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricPowerEnergy,
                            AMDGpuMetricsUnitType_t::kMetricCurrentStapmPowerLimit,
-                           metrics.m_current_stapm_power_limit,
-                           "current_stapm_power_limit");
+                           metrics.m_current_stapm_power_limit, "current_stapm_power_limit");
     // APU v3_0 average and current clock fields
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricAverageClock,
                            AMDGpuMetricsUnitType_t::kMetricAvgGfxClockFrequency,
@@ -1129,8 +1143,7 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
     // APU v3_0 throttle residency and filter fields
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricThrottleResidency,
                            AMDGpuMetricsUnitType_t::kMetricThrottleResidencyProchot,
-                           metrics.m_throttle_residency_prochot,
-                           "throttle_residency_prochot");
+                           metrics.m_throttle_residency_prochot, "throttle_residency_prochot");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricThrottleResidency,
                            AMDGpuMetricsUnitType_t::kMetricThrottleResidencySpl,
                            metrics.m_throttle_residency_spl, "throttle_residency_spl");
@@ -1142,16 +1155,13 @@ rsmi_status_t ApuMetricsBase_v30_t::populate_metrics_dynamic_tbl() {
                            metrics.m_throttle_residency_sppt, "throttle_residency_sppt");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricThrottleResidency,
                            AMDGpuMetricsUnitType_t::kMetricThrottleResidencyThmCore,
-                           metrics.m_throttle_residency_thm_core,
-                           "throttle_residency_thm_core");
+                           metrics.m_throttle_residency_thm_core, "throttle_residency_thm_core");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricThrottleResidency,
                            AMDGpuMetricsUnitType_t::kMetricThrottleResidencyThmGfx,
-                           metrics.m_throttle_residency_thm_gfx,
-                           "throttle_residency_thm_gfx");
+                           metrics.m_throttle_residency_thm_gfx, "throttle_residency_thm_gfx");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricThrottleResidency,
                            AMDGpuMetricsUnitType_t::kMetricThrottleResidencyThmSoc,
-                           metrics.m_throttle_residency_thm_soc,
-                           "throttle_residency_thm_soc");
+                           metrics.m_throttle_residency_thm_soc, "throttle_residency_thm_soc");
     populate_metrics_table(AMDGpuMetricsClassId_t::kGpuMetricTimestamp,
                            AMDGpuMetricsUnitType_t::kMetricTSClockCounter,
                            metrics.m_system_clock_counter, "system_clock_counter");
@@ -2198,7 +2208,7 @@ rsmi_status_t init_max_public_apu_metrics(rsmi_apu_metrics_t& rsmi_apu_metrics) 
   return rsmi_status_t::RSMI_STATUS_SUCCESS;
 }
 
-rsmi_status_t init_max_public_gpu_matrics(AMGpuMetricsPublicLatest_t& rsmi_gpu_metrics) {
+rsmi_status_t init_max_public_gpu_metrics(AMGpuMetricsPublicLatest_t& rsmi_gpu_metrics) {
   std::ostringstream ss;
   auto status_code(rsmi_status_t::RSMI_STATUS_SUCCESS);
   ss << __PRETTY_FUNCTION__ << " | ======= start =======";
@@ -2383,7 +2393,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBaseDynamic_t::copy_internal_to_externa
   LOG_TRACE(ss);
 
   AMGpuMetricsPublicLatest_t out{};
-  init_max_public_gpu_matrics(out);
+  init_max_public_gpu_metrics(out);
 
   out.common_header.structure_size = m_header.m_structure_size;
   out.common_header.format_revision = m_header.m_format_revision;
@@ -2619,7 +2629,7 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
   LOG_TRACE(ss);
 
   auto metrics_public_init = AMGpuMetricsPublicLatest_t{};
-  init_max_public_gpu_matrics(metrics_public_init);
+  init_max_public_gpu_metrics(metrics_public_init);
   init_max_public_apu_metrics(m_apu_metrics_tbl);
   metrics_public_init.apu_metrics = &m_apu_metrics_tbl;
 
@@ -2636,15 +2646,24 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
 
     apu.temperature_gfx = metrics.m_temperature_gfx;
     apu.temperature_soc = metrics.m_temperature_soc;
-    std::copy_n(std::begin(metrics.m_temperature_core), 8, apu.temperature_core);
-    std::copy_n(std::begin(metrics.m_temperature_l3), 2, apu.temperature_l3);
+    std::copy_n(std::begin(metrics.m_temperature_core),
+                std::min(static_cast<uint32_t>(RSMI_APU_V24_CORES),
+                         static_cast<uint32_t>(std::size(apu.temperature_core))),
+                apu.temperature_core);
+    std::copy_n(std::begin(metrics.m_temperature_l3),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_L3),
+                         static_cast<uint32_t>(std::size(apu.temperature_l3))),
+                apu.temperature_l3);
     apu.average_gfx_activity = metrics.m_average_gfx_activity;
     apu.average_mm_activity = metrics.m_average_mm_activity;
     apu.average_socket_power = metrics.m_average_socket_power;
     apu.average_cpu_power = metrics.m_average_cpu_power;
     apu.average_soc_power = metrics.m_average_soc_power;
     apu.average_gfx_power = metrics.m_average_gfx_power;
-    std::copy_n(std::begin(metrics.m_average_core_power), 8, apu.average_core_power);
+    std::copy_n(std::begin(metrics.m_average_core_power),
+                std::min(static_cast<uint32_t>(RSMI_APU_V24_CORES),
+                         static_cast<uint32_t>(std::size(apu.average_core_power))),
+                apu.average_core_power);
     apu.average_gfxclk_frequency = metrics.m_average_gfxclk_frequency;
     apu.average_socclk_frequency = metrics.m_average_socclk_frequency;
     apu.average_uclk_frequency = metrics.m_average_uclk_frequency;
@@ -2657,15 +2676,27 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
     apu.current_fclk = metrics.m_current_fclk;
     apu.current_vclk = metrics.m_current_vclk;
     apu.current_dclk = metrics.m_current_dclk;
-    std::copy_n(std::begin(metrics.m_current_coreclk), 8, apu.current_coreclk);
-    std::copy_n(std::begin(metrics.m_current_l3clk), 2, apu.current_l3clk);
+    std::copy_n(std::begin(metrics.m_current_coreclk),
+                std::min(static_cast<uint32_t>(RSMI_APU_V24_CORES),
+                         static_cast<uint32_t>(std::size(apu.current_coreclk))),
+                apu.current_coreclk);
+    std::copy_n(std::begin(metrics.m_current_l3clk),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_L3),
+                         static_cast<uint32_t>(std::size(apu.current_l3clk))),
+                apu.current_l3clk);
     apu.throttle_status = metrics.m_throttle_status;
     apu.indep_throttle_status = metrics.m_indep_throttle_status;
     apu.fan_pwm = metrics.m_fan_pwm;
     apu.average_temperature_gfx = metrics.m_average_temperature_gfx;
     apu.average_temperature_soc = metrics.m_average_temperature_soc;
-    std::copy_n(std::begin(metrics.m_average_temperature_core), 8, apu.average_temperature_core);
-    std::copy_n(std::begin(metrics.m_average_temperature_l3), 2, apu.average_temperature_l3);
+    std::copy_n(std::begin(metrics.m_average_temperature_core),
+                std::min(static_cast<uint32_t>(RSMI_APU_V24_CORES),
+                         static_cast<uint32_t>(std::size(apu.average_temperature_core))),
+                apu.average_temperature_core);
+    std::copy_n(std::begin(metrics.m_average_temperature_l3),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_L3),
+                         static_cast<uint32_t>(std::size(apu.average_temperature_l3))),
+                apu.average_temperature_l3);
     apu.average_cpu_voltage = metrics.m_average_cpu_voltage;
     apu.average_soc_voltage = metrics.m_average_soc_voltage;
     apu.average_gfx_voltage = metrics.m_average_gfx_voltage;
@@ -2696,12 +2727,20 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
 
     apu.temperature_gfx = metrics.m_temperature_gfx;
     apu.temperature_soc = metrics.m_temperature_soc;
-    std::copy_n(std::begin(metrics.m_temperature_core), 16, apu.temperature_core);
+    std::copy_n(std::begin(metrics.m_temperature_core),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_CORES),
+                         static_cast<uint32_t>(std::size(apu.temperature_core))),
+                apu.temperature_core);
     apu.temperature_skin = metrics.m_temperature_skin;
     apu.average_gfx_activity = metrics.m_average_gfx_activity;
     apu.average_vcn_activity = metrics.m_average_vcn_activity;
-    std::copy_n(std::begin(metrics.m_average_ipu_activity), 8, apu.average_ipu_activity);
-    std::copy_n(std::begin(metrics.m_average_core_c0_activity), 16,
+    std::copy_n(std::begin(metrics.m_average_ipu_activity),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_IPU),
+                         static_cast<uint32_t>(std::size(apu.average_ipu_activity))),
+                apu.average_ipu_activity);
+    std::copy_n(std::begin(metrics.m_average_core_c0_activity),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_CORES),
+                         static_cast<uint32_t>(std::size(apu.average_core_c0_activity))),
                 apu.average_core_c0_activity);
     apu.average_dram_reads = metrics.m_average_dram_reads;
     apu.average_dram_writes = metrics.m_average_dram_writes;
@@ -2713,7 +2752,10 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
     apu.average_gfx_power = metrics.m_average_gfx_power;
     apu.average_dgpu_power = metrics.m_average_dgpu_power;
     apu.average_all_core_power = metrics.m_average_all_core_power;
-    std::copy_n(std::begin(metrics.m_average_core_power), 16, apu.average_core_power);
+    std::copy_n(std::begin(metrics.m_average_core_power),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_CORES),
+                         static_cast<uint32_t>(std::size(apu.average_core_power))),
+                apu.average_core_power);
     apu.average_sys_power = metrics.m_average_sys_power;
     apu.stapm_power_limit = metrics.m_stapm_power_limit;
     apu.current_stapm_power_limit = metrics.m_current_stapm_power_limit;
@@ -2725,7 +2767,10 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
     apu.average_vclk_frequency = metrics.m_average_vclk_frequency;
     apu.average_uclk_frequency = metrics.m_average_uclk_frequency;
     apu.average_mpipu_frequency = metrics.m_average_mpipu_frequency;
-    std::copy_n(std::begin(metrics.m_current_coreclk), 16, apu.current_coreclk);
+    std::copy_n(std::begin(metrics.m_current_coreclk),
+                std::min(static_cast<uint32_t>(RSMI_APU_MAX_CORES),
+                         static_cast<uint32_t>(std::size(apu.current_coreclk))),
+                apu.current_coreclk);
     apu.current_core_maxfreq = metrics.m_current_core_maxfreq;
     apu.current_gfx_maxfreq = metrics.m_current_gfx_maxfreq;
     apu.throttle_residency_prochot = metrics.m_throttle_residency_prochot;
@@ -2738,10 +2783,20 @@ AMGpuMetricsPublicLatestTupl_t ApuMetricsBase_v30_t::copy_internal_to_external_m
     apu.time_filter_alphavalue = metrics.m_time_filter_alphavalue;
 
     metrics_public_init.average_gfx_activity = metrics.m_average_gfx_activity;
+    // Clamp socket power from uint32_t to uint16_t range with warning if truncation occurs
+    constexpr auto max_power =
+        std::numeric_limits<decltype(metrics_public_init.average_socket_power)>::max();
+    if (metrics.m_average_socket_power > max_power) {
+      ss << __PRETTY_FUNCTION__ << " | WARNING: Socket power value "
+         << metrics.m_average_socket_power << " mW exceeds uint16_t max, clamping to " << max_power
+         << " mW";
+      LOG_WARN(ss);
+      ss.str("");  // Clear stringstream
+      ss.clear();
+    }
     metrics_public_init.average_socket_power =
-        static_cast<decltype(metrics_public_init.average_socket_power)>(std::min<uint32_t>(
-            metrics.m_average_socket_power,
-            std::numeric_limits<decltype(metrics_public_init.average_socket_power)>::max()));
+        static_cast<decltype(metrics_public_init.average_socket_power)>(
+            std::min<uint32_t>(metrics.m_average_socket_power, max_power));
     metrics_public_init.system_clock_counter = metrics.m_system_clock_counter;
     metrics_public_init.average_gfxclk_frequency = metrics.m_average_gfxclk_frequency;
     metrics_public_init.average_socclk_frequency = metrics.m_average_socclk_frequency;
@@ -2769,7 +2824,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v18_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Logic below:
     // Default path (::kDevGpuMetrics / !m_is_partition_metrics):
@@ -3045,7 +3100,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v17_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -3231,7 +3286,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v16_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -3405,7 +3460,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v15_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -3578,7 +3633,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v14_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -3917,7 +3972,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v13_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -4200,7 +4255,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v12_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -4453,7 +4508,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v11_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
@@ -4694,7 +4749,7 @@ AMGpuMetricsPublicLatestTupl_t GpuMetricsBase_v10_t::copy_internal_to_external_m
     //
     //  Note: Initializing data members with their max. If field is max,
     //        no data was assigned to it.
-    init_max_public_gpu_matrics(metrics_public_init);
+    init_max_public_gpu_metrics(metrics_public_init);
 
     // Header
     metrics_public_init.common_header.structure_size =
