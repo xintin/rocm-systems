@@ -16,9 +16,10 @@ namespace hip {
 
 // ================================================================================================
 Stream::Stream(hip::Device* dev, Priority p, unsigned int f, bool null_stream,
-               const std::vector<uint32_t>& cuMask, hipStreamCaptureStatus captureStatus)
+               const std::vector<uint32_t>& cuMask, hipStreamCaptureStatus captureStatus,
+               bool dedicated_queue)
     : amd::HostQueue(*dev->asContext(), *dev->devices()[0], 0, amd::CommandQueue::RealTimeDisabled,
-                     convertToQueuePriority(p), cuMask, null_stream),
+                     convertToQueuePriority(p), cuMask, null_stream || dedicated_queue),
       device_(dev),
       priority_(p),
       flags_(f),

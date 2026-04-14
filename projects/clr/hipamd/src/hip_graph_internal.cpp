@@ -831,8 +831,11 @@ hipError_t GraphExec::CreateStreams(uint32_t num_streams, int devId) {
     max_streams, devId);
   parallel_streams_[devId].reserve(max_streams);
   for (uint32_t i = 0; i < max_streams; ++i) {
+    constexpr bool kNotNullStream = false;
+    constexpr bool kDedicatedQueue = true;
     auto stream = new hip::Stream(g_devices[devId], hip::Stream::Priority::Normal,
-                                  hipStreamNonBlocking);
+                                  hipStreamNonBlocking, kNotNullStream, {},
+                                  hipStreamCaptureStatusNone, kDedicatedQueue);
 
     if (!stream->Create()) {
       ClPrint(amd::LOG_ERROR, amd::LOG_CODE, "[hipGraph] Failed to create stream %u for device %d",
@@ -2052,6 +2055,10 @@ hipError_t GraphExec::Run(hip::Stream* launch_stream) {
       launch_stream->vdev()->HiddenHeapInit();
       initialized = true;
     }
+    // If the launch stream lost its HW queue (dynamic queues released it),
+    // try to re-acquire the same one it used last time
+    launch_stream->vdev()->SetPreferredQueue();
+    launch_stream->vdev()->AcquireQueueWithPreference();
     // Update streams for the graph execution only if launch stream changed
     if (lastLaunchStream_ != launch_stream) {
       UpdateStreams(launch_stream);
@@ -2077,6 +2084,10 @@ hipError_t GraphExec::Run(hip::Stream* launch_stream) {
       topoOrder_[i]->EnqueueCommands(launch_stream);
     }
   } else {
+    // If the launch stream lost its HW queue (dynamic queues released it),
+    // try to re-acquire the same one it used last time
+    launch_stream->vdev()->SetPreferredQueue();
+    launch_stream->vdev()->AcquireQueueWithPreference();
     // Update streams for the graph execution only if launch stream changed
     if (lastLaunchStream_ != launch_stream) {
       UpdateStreams(launch_stream);

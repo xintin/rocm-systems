@@ -288,7 +288,8 @@ namespace hip {
 
     Stream(Device* dev, Priority p = Priority::Normal, unsigned int f = 0, bool null_stream = false,
            const std::vector<uint32_t>& cuMask = {},
-           hipStreamCaptureStatus captureStatus = hipStreamCaptureStatusNone);
+           hipStreamCaptureStatus captureStatus = hipStreamCaptureStatusNone,
+           bool dedicated_queue = false);
 
     // --- Core stream operations ---
 

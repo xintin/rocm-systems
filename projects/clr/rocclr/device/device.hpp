@@ -1258,6 +1258,12 @@ class VirtualDevice : public amd::ReferenceCountedObject {
   //! Return the physical device for this virtual device.
   const amd::Device& device() const { return device_(); }
   virtual uint64_t getQueueID() = 0;
+
+  //! Snapshot the current HW queue as preferred for future re-acquisition (used by graph launch)
+  virtual void SetPreferredQueue() {}
+  //! Acquire a HW queue using the preferred hint, then clear the hint
+  virtual void AcquireQueueWithPreference() {}
+
   virtual void submitReadMemory(amd::ReadMemoryCommand& cmd) = 0;
   virtual void submitWriteMemory(amd::WriteMemoryCommand& cmd) = 0;
   virtual void submitCopyMemory(amd::CopyMemoryCommand& cmd) = 0;

@@ -967,6 +967,15 @@ bool VirtualGPU::processMemObjects(const amd::Kernel& kernel, const_address para
 }
 
 // ================================================================================================
+void VirtualGPU::AcquireQueueWithPreference() {
+  std::scoped_lock lock(execution());
+  if (!dedicated_queue_ && gpu_queue_ == nullptr && last_hwq_ != nullptr) {
+    gpu_queue_ = roc_device_.AcquireActiveQueue(priority_, last_hwq_);
+    last_hwq_ = nullptr;
+  }
+}
+
+// ================================================================================================
 uint64_t VirtualGPU::getQueueID() {
   std::scoped_lock lock(execution());
   // Dedicated queues keep their HW queue, never acquire from pool
@@ -1986,6 +1995,7 @@ void VirtualGPU::ReleaseHwQueue() {
     if (execution().try_lock()) {
       if (gpu_queue_ != nullptr) {
         if (IsQueueIdle()) {
+          last_hwq_ = gpu_queue_;
           if (roc_device_.ReleaseActiveQueue(gpu_queue_, priority_)) {
             gpu_queue_ = nullptr;
           }
