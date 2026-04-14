@@ -8,6 +8,7 @@ set(common_sources
     demangling.cpp
     dl.cpp
     environment.cpp
+    logging.cpp
     md5sum.cpp
     mpl.cpp
     parse.cpp
@@ -29,6 +30,21 @@ target_link_libraries(
 rocprofiler_add_unit_test(
     TARGET common-tests
     SOURCES ${common_sources}
+    ENVIRONMENT
+        "TEST_LOG_LEVEL=info"
+        "LD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:${CMAKE_INSTALL_PREFIX}/llvm/lib:/opt/rocm/lib:/opt/rocm/llvm/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+
+# Standalone test that verifies ROCP_* macros do not crash during atexit
+add_executable(logging-atexit-test)
+target_sources(logging-atexit-test PRIVATE logging_atexit.cpp)
+target_link_libraries(
+    logging-atexit-test PRIVATE rocprofiler-sdk::rocprofiler-sdk-headers
+                                rocprofiler-sdk::rocprofiler-sdk-common-library)
+
+rocprofiler_add_unit_test(
+    TARGET logging-atexit-test
+    SOURCES logging_atexit.cpp
     ENVIRONMENT
         "TEST_LOG_LEVEL=info"
         "LD_LIBRARY_PATH=${CMAKE_INSTALL_PREFIX}/lib:${CMAKE_INSTALL_PREFIX}/llvm/lib:/opt/rocm/lib:/opt/rocm/llvm/lib:$ENV{LD_LIBRARY_PATH}"

@@ -914,6 +914,7 @@ initialize()
         set_init_status(-1);
         std::atexit([]() {
             finalize();
+            common::logging_active() = false;
             common::destroy_static_tl_objects();
             common::destroy_static_objects();
         });

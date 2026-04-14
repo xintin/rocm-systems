@@ -38,6 +38,13 @@ namespace rocprofiler
 {
 namespace common
 {
+std::atomic<bool>&
+logging_active()
+{
+    static std::atomic<bool> v{false};
+    return v;
+}
+
 namespace
 {
 namespace fs = ::rocprofiler::common::filesystem;
@@ -157,6 +164,7 @@ init_logging(std::string_view env_prefix, logging_config cfg)
         }
 
         update_logging(cfg);
+        logging_active() = true;
 
         ROCP_INFO << "logging initialized via " << fmt::format("{}_LOG_LEVEL", env_prefix)
                   << ". Log Level: " << loglvl << ". Verbose Log Level: " << vlog_level;
