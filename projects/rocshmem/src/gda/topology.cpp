@@ -1077,12 +1077,6 @@ namespace rocshmem
       return -1;
     }
 
-    for (auto const& c : candidates) {
-      nic_names.push_back(ibvDeviceList[c.idx].name);
-      DPRINTF("  NIC candidate: %s pathType=%d dist=%d",
-              ibvDeviceList[c.idx].name.c_str(), c.pathType, c.distance);
-    }
-
     return static_cast<int>(candidates.size());
   }
 

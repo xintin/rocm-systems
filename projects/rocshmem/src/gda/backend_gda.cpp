@@ -95,12 +95,13 @@ void GDABackend::init() {
 
   configure_nic_policy();
 
-  LOG_TRACE("PE %d QP config: num_nics=%d, "
-    "qps_per_pe_default_ctx=%zu, qps_per_pe_usr_ctx=%zu, "
-    "num_qps_per_pe=%zu, num_qps=%u, nic_policy=%s",
-    my_pe, num_nics_, qps_per_pe_default_ctx_, qps_per_pe_usr_ctx_,
-    num_qps_per_pe, num_qps,
-    nic_policy_ == NicPolicy::PER_CONTEXT ? "PER_CONTEXT" : "ROUND_ROBIN");
+  LOG_TRACE("PE %d QP config: num_nics=%d, qps_per_pe_default_ctx=%zu, "
+            "qps_per_pe_usr_ctx=%zu, num_qps_per_pe=%zu, num_qps=%u, "
+            "nic_policy=%s",
+            my_pe, num_nics_, qps_per_pe_default_ctx_, qps_per_pe_usr_ctx_,
+            num_qps_per_pe, num_qps,
+            nic_policy_ == NicPolicy::PER_CONTEXT ? "PER_CONTEXT"
+                                                  : "ROUND_ROBIN");
 
   //TODO setup_host_interface();
   /* Initialize the host interface */
@@ -168,8 +169,7 @@ void GDABackend::configure_nic_policy() {
   } else if (policy_upper == "ROUND_ROBIN") {
     nic_policy_ = NicPolicy::ROUND_ROBIN;
   } else {
-    LOG_WARN("Unknown NIC_POLICY '%s', using ROUND_ROBIN",
-             policy_str.c_str());
+    LOG_WARN("Unknown NIC_POLICY '%s', using ROUND_ROBIN", policy_str.c_str());
     nic_policy_ = NicPolicy::ROUND_ROBIN;
   }
 
@@ -188,8 +188,6 @@ void GDABackend::configure_nic_policy() {
 }
 
 void GDABackend::select_nics() {
-  bool verbose = envvar::debug_level.get_value() >= envvar::types::debug_level::TRACE;
-
   const std::string &force_merge = envvar::gda::net_force_merge.get_value();
   const std::string &merge_level_str = envvar::gda::net_merge_level.get_value();
   bool use_force_merge = !force_merge.empty();
@@ -207,9 +205,9 @@ void GDABackend::select_nics() {
     std::string my_group = SelectRankGroup(force_merge, my_pe);
     nic_names = ParseNicList(my_group);
     if (nic_names.empty()) {
-      LOG_ERROR_EXIT("ROCSHMEM_GDA_NET_FORCE_MERGE is set but "
-              "contains no valid NIC names for PE %d: '%s'",
-              my_pe, force_merge.c_str());
+      LOG_ERROR_EXIT("ROCSHMEM_GDA_NET_FORCE_MERGE is set but contains no valid"
+                     " NIC names for PE %d: '%s'",
+                     my_pe, force_merge.c_str());
     }
   } else if (use_auto_merge) {
     auto merge_level = rocshmem::ParseNicMergeLevel(merge_level_str);
@@ -218,8 +216,8 @@ void GDABackend::select_nics() {
                                               nic_names);
 
     if (found <= 0) {
-      LOG_ERROR_EXIT("NIC fusion enabled but no NICs found "
-                     "(merge_level=%s)", merge_level_str.c_str());
+      LOG_ERROR_EXIT("NIC fusion enabled but no NICs found (merge_level=%s)",
+                     merge_level_str.c_str());
     }
   } else {
     std::string name;
@@ -243,8 +241,8 @@ void GDABackend::select_nics() {
     for (int i = 0; i < num_nics_; i++) {
       nic_list += " " + nic_devices_[i].nic_name;
     }
-    LOG_INFO("PE %d GPU %d selected %d NIC(s):%s",
-             my_pe, gpu_dev, num_nics_, nic_list.c_str());
+    LOG_INFO("PE %d GPU %d selected %d NIC(s):%s", my_pe, gpu_dev, num_nics_,
+             nic_list.c_str());
   }
 }
 
@@ -279,8 +277,8 @@ void GDABackend::log_ctx_nics(unsigned int ctx_id, size_t qps_per_pe,
     if (r) nic_list += " ";
     nic_list += nic_devices_[nidx].nic_name;
   }
-  LOG_TRACE("PE %d ctx %u qps_per_pe=%zu NICs=[%s]",
-            my_pe, ctx_id, qps_per_pe, nic_list.c_str());
+  LOG_TRACE("PE %d ctx %u qps_per_pe=%zu NICs=[%s]", my_pe, ctx_id, qps_per_pe,
+            nic_list.c_str());
 }
 
 void GDABackend::setup_ctxs() {
