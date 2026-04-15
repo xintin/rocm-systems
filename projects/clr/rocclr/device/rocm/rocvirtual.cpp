@@ -308,9 +308,11 @@ void Timestamp::ExtractSignalTiming(ProfilingSignal* signal,
     end = std::max(sig_end, end);
   }
 
-  // Handle AccumulateCommand timestamps
+  // Handle AccumulateCommand timestamps (convert ticks to system time)
   if ((command().type() == CL_COMMAND_TASK) && (signal->flags_.isPacketDispatch_ == true)) {
-    static_cast<amd::AccumulateCommand&>(command()).addTimestamps(sig_start, sig_end);
+    static_cast<amd::AccumulateCommand&>(command()).addTimestamps(
+        static_cast<uint64_t>(sig_start * ticksToTime_),
+        static_cast<uint64_t>(sig_end * ticksToTime_));
   }
 
   signal->flags_.done_ = true;
