@@ -39,6 +39,10 @@ jobs:
         id: ci-flags
         run: |
           echo "changed_dockerfile=$(./util/files-changed.sh "origin/${GITHUB_BASE_REF}" HEAD 'util/docker/DOCKERFILE.*')" >> "${GITHUB_OUTPUT}"
+          ls util/docker/
+          git diff --name-only origin/develop HEAD 'util/docker/DOCKERFILE.*'
+          pwd
+          grep "ARG ROCM_VERSION" ./util/docker/DOCKERFILE.ais_ci_*
 
   build_AIS_CI_image:
     needs: AIS_CI_Pre-check
