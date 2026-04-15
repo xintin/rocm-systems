@@ -28,11 +28,16 @@ find_program(DL_BUNDLER NAMES clang-offload-bundler
         "${ROCM_PATH}/llvm/bin" REQUIRED)
 
 # Derive --rocm-path for amdclang++ -x hip invocations.
-# Use ROCM_PATH if set and non-empty (standard installs, math-ci).
-# Otherwise derive from the compiler's location (TheRock sets ROCM_PATH="").
+# Priority: ROCM_PATH > hip package prefix > compiler filesystem search.
+set(DL_ROCM_PATH "")
 if(ROCM_PATH)
   set(DL_ROCM_PATH "${ROCM_PATH}")
-else()
+elseif(hip_DIR)
+  # hip_DIR = <prefix>/lib/cmake/hip — go up three levels to get the prefix.
+  get_filename_component(DL_ROCM_PATH "${hip_DIR}/../../.." ABSOLUTE)
+endif()
+if(NOT DL_ROCM_PATH)
+  # Last resort: search upward from the compiler binary.
   get_filename_component(_dl_clang_real "${DL_CLANG}" REALPATH)
   get_filename_component(_dl_clang_dir "${_dl_clang_real}" DIRECTORY)
   foreach(_up ".." "../../../.." "../..")
@@ -108,14 +113,17 @@ if(_rccl_includes)
 endif()
 
 # System includes: HIP headers.
-# Query hip::host or hip::device for INTERFACE_INCLUDE_DIRECTORIES.
-if(TARGET hip::host)
-  get_target_property(_hip_includes hip::host INTERFACE_INCLUDE_DIRECTORIES)
-  if(_hip_includes)
-    target_include_directories(rccl_device_defs SYSTEM INTERFACE ${_hip_includes})
+# hip::host has no INTERFACE_INCLUDE_DIRECTORIES; hip::device does.
+set(_hip_includes "")
+foreach(_hip_tgt hip::device hip::amdhip64 hip::host)
+  if(TARGET ${_hip_tgt} AND NOT _hip_includes)
+    get_target_property(_hip_includes ${_hip_tgt} INTERFACE_INCLUDE_DIRECTORIES)
   endif()
-elseif(ROCM_PATH)
-  target_include_directories(rccl_device_defs SYSTEM INTERFACE "${ROCM_PATH}/include")
+endforeach()
+if(_hip_includes)
+  target_include_directories(rccl_device_defs SYSTEM INTERFACE ${_hip_includes})
+elseif(DL_ROCM_PATH)
+  target_include_directories(rccl_device_defs SYSTEM INTERFACE "${DL_ROCM_PATH}/include")
 endif()
 
 # fmt include path (FetchContent builds only; system-installed fmt is in the default path)

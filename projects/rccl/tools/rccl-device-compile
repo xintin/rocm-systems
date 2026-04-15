@@ -415,9 +415,13 @@ def find_tool(name, hints, required=True):
     return None
 
 
-def _derive_rocm_path(compiler_dir):
-    """Derive --rocm-path from the compiler's filesystem location.
-    Searches upward for a directory containing include/hip."""
+def _derive_rocm_path(compiler_dir, include_paths):
+    """Derive --rocm-path from include paths or the compiler's filesystem location."""
+    # Check include paths for one containing hip/hip_runtime.h (from hip::host)
+    for inc in include_paths:
+        if os.path.isdir(os.path.join(inc, 'hip')):
+            return os.path.normpath(os.path.join(inc, '..'))
+    # Search upward from compiler binary
     candidates = [
         os.path.normpath(os.path.join(compiler_dir, '..')),
         os.path.normpath(os.path.join(compiler_dir, '..', '..', '..', '..')),
@@ -470,11 +474,18 @@ def run(cmd, description=""):
 # Compile mode: .cpp -> .o + .resources.json
 # ---------------------------------------------------------------------------
 
-def _resolve_rocm_path(args_rocm_path, clang):
-    """Resolve --rocm-path: use explicit value, or derive from compiler."""
+def _resolve_rocm_path(args_rocm_path, clang, forwarded_flags):
+    """Resolve --rocm-path: use explicit value, or derive from compiler/includes."""
     if args_rocm_path:
         return args_rocm_path
-    return _derive_rocm_path(os.path.dirname(os.path.realpath(clang)))
+    # Extract -I paths from forwarded flags to help locate hip
+    inc_paths = []
+    for i, f in enumerate(forwarded_flags):
+        if f.startswith('-I') and len(f) > 2:
+            inc_paths.append(f[2:])
+        elif f.startswith('-isystem') and len(f) > 8:
+            inc_paths.append(f[8:])
+    return _derive_rocm_path(os.path.dirname(os.path.realpath(clang)), inc_paths)
 
 
 def do_compile(args, forwarded_flags):
@@ -487,7 +498,7 @@ def do_compile(args, forwarded_flags):
     base = os.path.splitext(output)[0]
     json_out = base + '.resources.json'
 
-    rocm_path = _resolve_rocm_path(args.rocm_path, clang)
+    rocm_path = _resolve_rocm_path(args.rocm_path, clang, forwarded_flags)
     rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else []
 
     # Determine temp directory: alongside output if --keep-temps, else truly temp
@@ -601,7 +612,7 @@ def do_link(args, forwarded_flags):
 
     try:
         # Step 2: Compile dispatcher to assembly
-        rocm_path = _resolve_rocm_path(args.rocm_path, clang)
+        rocm_path = _resolve_rocm_path(args.rocm_path, clang, forwarded_flags)
         rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else []
         disp_compile_cmd = [
             clang,
