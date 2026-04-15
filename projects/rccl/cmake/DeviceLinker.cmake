@@ -27,6 +27,22 @@ find_program(DL_BUNDLER NAMES clang-offload-bundler
   HINTS "${_dl_compiler_dir}" "${_dl_compiler_dir}/../lib/llvm/bin"
         "${ROCM_PATH}/llvm/bin" REQUIRED)
 
+# Derive --rocm-path for custom commands that invoke amdclang++ with -x hip.
+# The compiler may be in bin/ or lib/llvm/bin/ relative to the ROCm root.
+set(DL_ROCM_PATH_FLAG "")
+get_filename_component(_dl_clang_real "${DL_CLANG}" REALPATH)
+get_filename_component(_dl_clang_dir "${_dl_clang_real}" DIRECTORY)
+foreach(_up ".." "../../../.." "../..")
+  get_filename_component(_candidate "${_dl_clang_dir}/${_up}" ABSOLUTE)
+  if(EXISTS "${_candidate}/include/hip")
+    set(DL_ROCM_PATH_FLAG "--rocm-path=${_candidate}")
+    break()
+  endif()
+endforeach()
+if(NOT DL_ROCM_PATH_FLAG)
+  set(DL_ROCM_PATH_FLAG "-nogpuinc")
+endif()
+
 set(DEVICE_BUILD_DIR "${PROJECT_BINARY_DIR}/device_build")
 set(SPECIALIZED_DIR  "${GEN_DIR}/specialized")
 
@@ -303,6 +319,7 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
         ${_link_inc_flags}
         -x hip --cuda-device-only --offload-arch=${DL_GPU_TARGET}
         --no-gpu-bundle-output
+        ${DL_ROCM_PATH_FLAG}
         -gline-tables-only
         -std=c++17 -w ${DL_OPT_FLAGS}
         -emit-llvm -S
@@ -369,6 +386,7 @@ add_custom_command(
   OUTPUT  ${COMMON_FAT_OBJ}
   COMMAND ${DL_CLANG}
     -x hip --offload-host-only ${DL_OFFLOAD_ARCH_FLAGS}
+    ${DL_ROCM_PATH_FLAG}
     -Xclang -fcuda-include-gpubinary -Xclang ${DEVICE_HIPFB}
     -DRCCL_DEVICE_LINKER
     ${_link_def_flags}
@@ -394,6 +412,7 @@ add_custom_command(
   OUTPUT  ${ONERANK_FAT_OBJ}
   COMMAND ${DL_CLANG}
     -x hip ${DL_OFFLOAD_ARCH_FLAGS}
+    ${DL_ROCM_PATH_FLAG}
     -DRCCL_DEVICE_LINKER
     ${_link_def_flags}
     ${_host_inc_flags}
@@ -418,6 +437,7 @@ add_custom_command(
   OUTPUT  ${COLLECTIVES_FAT_OBJ}
   COMMAND ${DL_CLANG}
     -x hip ${DL_OFFLOAD_ARCH_FLAGS}
+    ${DL_ROCM_PATH_FLAG}
     -DRCCL_DEVICE_LINKER
     ${_link_def_flags}
     ${_host_inc_flags}

@@ -413,8 +413,27 @@ def find_tool(name, hints, required=True):
     return None
 
 
+def _derive_rocm_path(compiler_dir):
+    """Derive --rocm-path from the compiler's location.
+
+    Handles two layouts:
+      /opt/rocm/bin/amdclang++          -> /opt/rocm
+      .../dist/lib/llvm/bin/amdclang++  -> .../dist
+    Returns the path if a valid HIP include dir is found, else None.
+    """
+    candidates = [
+        os.path.normpath(os.path.join(compiler_dir, '..')),           # bin/..
+        os.path.normpath(os.path.join(compiler_dir, '..', '..', '..', '..')),  # lib/llvm/bin/../../../..
+        os.path.normpath(os.path.join(compiler_dir, '..', '..')),     # llvm/bin/../..
+    ]
+    for c in candidates:
+        if os.path.isdir(os.path.join(c, 'include', 'hip')):
+            return c
+    return None
+
+
 def discover_tools(clang_path):
-    """Discover amdclang++, ld.lld from the given compiler path or search."""
+    """Discover amdclang++, ld.lld, and rocm-path from the given compiler path."""
     if clang_path:
         clang = clang_path
     else:
@@ -428,7 +447,8 @@ def discover_tools(clang_path):
     hints = [compiler_dir, llvm_bin]
 
     lld = find_tool('ld.lld', hints)
-    return clang, lld
+    rocm_path = _derive_rocm_path(compiler_dir)
+    return clang, lld, rocm_path
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +475,7 @@ def run(cmd, description=""):
 # ---------------------------------------------------------------------------
 
 def do_compile(args, forwarded_flags):
-    clang, _ = discover_tools(args.clang)
+    clang, _, rocm_path = discover_tools(args.clang)
     arch = args.arch
     source = args.source
     output = args.output
@@ -463,6 +483,8 @@ def do_compile(args, forwarded_flags):
 
     base = os.path.splitext(output)[0]
     json_out = base + '.resources.json'
+
+    rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else ['-nogpuinc']
 
     # Determine temp directory: alongside output if --keep-temps, else truly temp
     if keep_temps:
@@ -484,7 +506,7 @@ def do_compile(args, forwarded_flags):
             '--no-gpu-bundle-output',
             '-gline-tables-only',
             '-w',
-        ] + forwarded_flags + [
+        ] + rocm_path_flags + forwarded_flags + [
             '-S', '-o', asm_file, source,
         ]
         run(compile_cmd, f"compile {os.path.basename(source)}")
@@ -532,7 +554,7 @@ def do_compile(args, forwarded_flags):
 # ---------------------------------------------------------------------------
 
 def do_link(args, forwarded_flags):
-    clang, lld = discover_tools(args.clang)
+    clang, lld, rocm_path = discover_tools(args.clang)
     arch = args.arch
     objects = args.objects
     output = args.output
@@ -575,13 +597,14 @@ def do_link(args, forwarded_flags):
 
     try:
         # Step 2: Compile dispatcher to assembly
+        rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else ['-nogpuinc']
         disp_compile_cmd = [
             clang,
             '-x', 'hip', '--cuda-device-only',
             f'--offload-arch={arch}',
             '--no-gpu-bundle-output',
             '-g', '-w',
-        ] + forwarded_flags + [
+        ] + rocm_path_flags + forwarded_flags + [
             '-S', '-o', disp_asm, dispatcher,
         ]
         run(disp_compile_cmd, f"compile dispatcher for {arch}")
