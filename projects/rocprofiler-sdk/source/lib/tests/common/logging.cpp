@@ -31,34 +31,3 @@ TEST(common, logging_active_after_init)
     // so logging_active should be true by the time tests run.
     EXPECT_TRUE(rocprofiler::common::logging_active().load());
 }
-
-TEST(common, logging_guard_drops_info_when_inactive)
-{
-    // Temporarily disable logging
-    rocprofiler::common::logging_active() = false;
-
-    // ROCP_INFO should be a no-op (no crash, no output)
-    ROCP_INFO << "this message should be silently dropped";
-
-    // Re-enable
-    rocprofiler::common::logging_active() = true;
-}
-
-TEST(common, logging_guard_drops_warning_when_inactive)
-{
-    rocprofiler::common::logging_active() = false;
-
-    ROCP_WARNING << "this warning should be silently dropped";
-
-    rocprofiler::common::logging_active() = true;
-}
-
-TEST(common, logging_guard_drops_error_when_inactive)
-{
-    rocprofiler::common::logging_active() = false;
-
-    // ROCP_ERROR should be a no-op (no crash, no output)
-    ROCP_ERROR << "this error should be silently dropped";
-
-    rocprofiler::common::logging_active() = true;
-}

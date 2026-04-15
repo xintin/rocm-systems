@@ -41,29 +41,19 @@
 #define ROCP_LOG_LEVEL_ERROR   1
 #define ROCP_LOG_LEVEL_NONE    0
 
-// clang-format off
+#define ROCP_TRACE   VLOG(ROCP_LOG_LEVEL_TRACE)
+#define ROCP_INFO    LOG(INFO)
+#define ROCP_WARNING LOG(WARNING)
+#define ROCP_ERROR   LOG(ERROR)
+#define ROCP_FATAL   LOG(FATAL)
+#define ROCP_DFATAL  DLOG(FATAL)
 
-// Silently dropped when logging is inactive (during teardown)
-#define ROCP_TRACE   LOG_IF(INFO, VLOG_IS_ON(ROCP_LOG_LEVEL_TRACE) && ::rocprofiler::common::logging_active())
-#define ROCP_INFO    LOG_IF(INFO, ::rocprofiler::common::logging_active())
-#define ROCP_WARNING LOG_IF(WARNING, ::rocprofiler::common::logging_active())
-
-// Silently dropped when logging is inactive (during teardown)
-#define ROCP_ERROR   LOG_IF(ERROR, ::rocprofiler::common::logging_active())
-
-// Always active — fatal errors should always be reported
-#define ROCP_FATAL  LOG(FATAL)
-#define ROCP_DFATAL DLOG(FATAL)
-
-// Conditional variants
-#define ROCP_TRACE_IF(CONDITION)   LOG_IF(INFO, VLOG_IS_ON(ROCP_LOG_LEVEL_TRACE) && (CONDITION) && ::rocprofiler::common::logging_active())
-#define ROCP_INFO_IF(CONDITION)    LOG_IF(INFO, (CONDITION) && ::rocprofiler::common::logging_active())
-#define ROCP_WARNING_IF(CONDITION) LOG_IF(WARNING, (CONDITION) && ::rocprofiler::common::logging_active())
-#define ROCP_ERROR_IF(CONDITION)   LOG_IF(ERROR, (CONDITION) && ::rocprofiler::common::logging_active())
+#define ROCP_TRACE_IF(CONDITION)   VLOG_IF(ROCP_LOG_LEVEL_TRACE, (CONDITION))
+#define ROCP_INFO_IF(CONDITION)    LOG_IF(INFO, (CONDITION))
+#define ROCP_WARNING_IF(CONDITION) LOG_IF(WARNING, (CONDITION))
+#define ROCP_ERROR_IF(CONDITION)   LOG_IF(ERROR, (CONDITION))
 #define ROCP_FATAL_IF(CONDITION)   LOG_IF(FATAL, (CONDITION))
 #define ROCP_DFATAL_IF(CONDITION)  DLOG_IF(FATAL, (CONDITION))
-
-// clang-format on
 
 #if defined(ROCPROFILER_CI)
 #    define ROCP_CI_LOG_IF(NON_CI_LEVEL, ...) ROCP_FATAL_IF(__VA_ARGS__)

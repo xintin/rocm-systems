@@ -916,10 +916,6 @@ initialize()
             finalize();
             common::destroy_static_tl_objects();
             common::destroy_static_objects();
-            // Disable logging after all static objects are destroyed.
-            // This must come last so that destructors can still use ROCP_* macros,
-            // matching develop's behavior where LOG() calls always execute.
-            common::logging_active() = false;
         });
         invoke_client_configures();
         invoke_client_initializers();
