@@ -27,21 +27,9 @@ find_program(DL_BUNDLER NAMES clang-offload-bundler
   HINTS "${_dl_compiler_dir}" "${_dl_compiler_dir}/../lib/llvm/bin"
         "${ROCM_PATH}/llvm/bin" REQUIRED)
 
-# Derive --rocm-path for custom commands that invoke amdclang++ with -x hip.
-# The compiler may be in bin/ or lib/llvm/bin/ relative to the ROCm root.
-set(DL_ROCM_PATH_FLAG "")
-get_filename_component(_dl_clang_real "${DL_CLANG}" REALPATH)
-get_filename_component(_dl_clang_dir "${_dl_clang_real}" DIRECTORY)
-foreach(_up ".." "../../../.." "../..")
-  get_filename_component(_candidate "${_dl_clang_dir}/${_up}" ABSOLUTE)
-  if(EXISTS "${_candidate}/include/hip")
-    set(DL_ROCM_PATH_FLAG "--rocm-path=${_candidate}")
-    break()
-  endif()
-endforeach()
-if(NOT DL_ROCM_PATH_FLAG)
-  set(DL_ROCM_PATH_FLAG "-nogpuinc")
-endif()
+# ROCM_PATH is always set (by the user, TheRock, or defaulting to /opt/rocm).
+# Pass it through so amdclang++ can find HIP runtime headers in any layout.
+set(DL_ROCM_PATH_FLAG "--rocm-path=${ROCM_PATH}")
 
 set(DEVICE_BUILD_DIR "${PROJECT_BINARY_DIR}/device_build")
 set(SPECIALIZED_DIR  "${GEN_DIR}/specialized")
@@ -221,6 +209,7 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
   target_compile_options(${_dev_target} PRIVATE
     --arch=${DL_GPU_TARGET}
     --clang=${DL_CLANG}
+    --rocm-path=${ROCM_PATH}
     ${DL_OPT_FLAGS}
     -std=c++17
   )
@@ -272,6 +261,7 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
       --link
       --arch=${DL_GPU_TARGET}
       --clang=${DL_CLANG}
+      --rocm-path=${ROCM_PATH}
       --dispatcher=${HIPIFY_DIR}/src/device/common.cu.cpp
       ${_link_def_flags}
       ${_link_inc_flags}

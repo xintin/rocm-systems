@@ -22,6 +22,8 @@ Link mode (--link):
 Tool discovery:
     amdclang++, ld.lld are found relative to --clang=<path> or by searching
     PATH and the directory containing the system C++ compiler.
+    --rocm-path=<path> is forwarded to amdclang++ for HIP runtime discovery;
+    CMake passes the value it already knows at configure time.
 """
 
 import argparse
@@ -413,27 +415,8 @@ def find_tool(name, hints, required=True):
     return None
 
 
-def _derive_rocm_path(compiler_dir):
-    """Derive --rocm-path from the compiler's location.
-
-    Handles two layouts:
-      /opt/rocm/bin/amdclang++          -> /opt/rocm
-      .../dist/lib/llvm/bin/amdclang++  -> .../dist
-    Returns the path if a valid HIP include dir is found, else None.
-    """
-    candidates = [
-        os.path.normpath(os.path.join(compiler_dir, '..')),           # bin/..
-        os.path.normpath(os.path.join(compiler_dir, '..', '..', '..', '..')),  # lib/llvm/bin/../../../..
-        os.path.normpath(os.path.join(compiler_dir, '..', '..')),     # llvm/bin/../..
-    ]
-    for c in candidates:
-        if os.path.isdir(os.path.join(c, 'include', 'hip')):
-            return c
-    return None
-
-
 def discover_tools(clang_path):
-    """Discover amdclang++, ld.lld, and rocm-path from the given compiler path."""
+    """Discover amdclang++ and ld.lld from the given compiler path."""
     if clang_path:
         clang = clang_path
     else:
@@ -447,8 +430,7 @@ def discover_tools(clang_path):
     hints = [compiler_dir, llvm_bin]
 
     lld = find_tool('ld.lld', hints)
-    rocm_path = _derive_rocm_path(compiler_dir)
-    return clang, lld, rocm_path
+    return clang, lld
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +457,7 @@ def run(cmd, description=""):
 # ---------------------------------------------------------------------------
 
 def do_compile(args, forwarded_flags):
-    clang, _, rocm_path = discover_tools(args.clang)
+    clang, _ = discover_tools(args.clang)
     arch = args.arch
     source = args.source
     output = args.output
@@ -484,7 +466,7 @@ def do_compile(args, forwarded_flags):
     base = os.path.splitext(output)[0]
     json_out = base + '.resources.json'
 
-    rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else ['-nogpuinc']
+    rocm_path_flags = [f'--rocm-path={args.rocm_path}'] if args.rocm_path else []
 
     # Determine temp directory: alongside output if --keep-temps, else truly temp
     if keep_temps:
@@ -554,7 +536,7 @@ def do_compile(args, forwarded_flags):
 # ---------------------------------------------------------------------------
 
 def do_link(args, forwarded_flags):
-    clang, lld, rocm_path = discover_tools(args.clang)
+    clang, lld = discover_tools(args.clang)
     arch = args.arch
     objects = args.objects
     output = args.output
@@ -597,7 +579,7 @@ def do_link(args, forwarded_flags):
 
     try:
         # Step 2: Compile dispatcher to assembly
-        rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else ['-nogpuinc']
+        rocm_path_flags = [f'--rocm-path={args.rocm_path}'] if args.rocm_path else []
         disp_compile_cmd = [
             clang,
             '-x', 'hip', '--cuda-device-only',
@@ -684,6 +666,11 @@ def parse_compiler_flags(argv):
         elif arg == '--clang' and i + 1 < len(argv):
             our_args.extend([arg, argv[i + 1]])
             i += 1
+        elif arg.startswith('--rocm-path='):
+            our_args.append(arg)
+        elif arg == '--rocm-path' and i + 1 < len(argv):
+            our_args.extend([arg, argv[i + 1]])
+            i += 1
         elif arg.startswith('--dispatcher='):
             our_args.append(arg)
         elif arg == '--dispatcher' and i + 1 < len(argv):
@@ -720,6 +707,7 @@ def main():
     parser.add_argument('--link', action='store_true')
     parser.add_argument('--arch', required=False)
     parser.add_argument('--clang', default=None)
+    parser.add_argument('--rocm-path', default=None)
     parser.add_argument('--dispatcher', default=None)
     parser.add_argument('-o', '--output', required=False)
     parser.add_argument('--keep-temps', action='store_true')
