@@ -56,6 +56,23 @@ else()
   message(WARNING "Device Linker: could not determine --rocm-path, HIP runtime may not be found")
 endif()
 
+# Derive --rocm-device-lib-path for amdgcn bitcode files.
+# On standard installs these live under ROCM_PATH/amdgcn/bitcode; in TheRock
+# they're under the compiler's staging dir (separate from the hip package).
+set(DL_DEVICE_LIB_PATH "")
+if(DL_ROCM_PATH AND EXISTS "${DL_ROCM_PATH}/amdgcn/bitcode")
+  set(DL_DEVICE_LIB_PATH "${DL_ROCM_PATH}/amdgcn/bitcode")
+elseif(AMDDeviceLibs_DIR)
+  # AMDDeviceLibs_DIR = <prefix>/lib/cmake/AMDDeviceLibs — 4 levels up.
+  get_filename_component(_dl_devlibs_prefix "${AMDDeviceLibs_DIR}/../../../.." ABSOLUTE)
+  if(EXISTS "${_dl_devlibs_prefix}/amdgcn/bitcode")
+    set(DL_DEVICE_LIB_PATH "${_dl_devlibs_prefix}/amdgcn/bitcode")
+  endif()
+endif()
+if(DL_DEVICE_LIB_PATH)
+  message(STATUS "Device Linker: --rocm-device-lib-path=${DL_DEVICE_LIB_PATH}")
+endif()
+
 set(DEVICE_BUILD_DIR "${PROJECT_BINARY_DIR}/device_build")
 set(SPECIALIZED_DIR  "${GEN_DIR}/specialized")
 
@@ -243,6 +260,9 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
   if(DL_ROCM_PATH)
     list(APPEND _dev_compile_opts --rocm-path=${DL_ROCM_PATH})
   endif()
+  if(DL_DEVICE_LIB_PATH)
+    list(APPEND _dev_compile_opts --rocm-device-lib-path=${DL_DEVICE_LIB_PATH})
+  endif()
   target_compile_options(${_dev_target} PRIVATE ${_dev_compile_opts})
   target_compile_definitions(${_dev_target} PRIVATE RCCL_DEVICE_LINKER)
   target_link_libraries(${_dev_target} PRIVATE rccl_device_defs)
@@ -293,6 +313,7 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
       --arch=${DL_GPU_TARGET}
       --clang=${DL_CLANG}
       $<$<BOOL:${DL_ROCM_PATH}>:--rocm-path=${DL_ROCM_PATH}>
+      $<$<BOOL:${DL_DEVICE_LIB_PATH}>:--rocm-device-lib-path=${DL_DEVICE_LIB_PATH}>
       --dispatcher=${HIPIFY_DIR}/src/device/common.cu.cpp
       ${_link_def_flags}
       ${_link_inc_flags}

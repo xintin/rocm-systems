@@ -500,6 +500,8 @@ def do_compile(args, forwarded_flags):
 
     rocm_path = _resolve_rocm_path(args.rocm_path, clang, forwarded_flags)
     rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else []
+    if args.rocm_device_lib_path:
+        rocm_path_flags.append(f'--rocm-device-lib-path={args.rocm_device_lib_path}')
 
     # Determine temp directory: alongside output if --keep-temps, else truly temp
     if keep_temps:
@@ -614,6 +616,8 @@ def do_link(args, forwarded_flags):
         # Step 2: Compile dispatcher to assembly
         rocm_path = _resolve_rocm_path(args.rocm_path, clang, forwarded_flags)
         rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else []
+        if args.rocm_device_lib_path:
+            rocm_path_flags.append(f'--rocm-device-lib-path={args.rocm_device_lib_path}')
         disp_compile_cmd = [
             clang,
             '-x', 'hip', '--cuda-device-only',
@@ -705,6 +709,11 @@ def parse_compiler_flags(argv):
         elif arg == '--rocm-path' and i + 1 < len(argv):
             our_args.extend([arg, argv[i + 1]])
             i += 1
+        elif arg.startswith('--rocm-device-lib-path='):
+            our_args.append(arg)
+        elif arg == '--rocm-device-lib-path' and i + 1 < len(argv):
+            our_args.extend([arg, argv[i + 1]])
+            i += 1
         elif arg.startswith('--dispatcher='):
             our_args.append(arg)
         elif arg == '--dispatcher' and i + 1 < len(argv):
@@ -742,6 +751,7 @@ def main():
     parser.add_argument('--arch', required=False)
     parser.add_argument('--clang', default=None)
     parser.add_argument('--rocm-path', default=None)
+    parser.add_argument('--rocm-device-lib-path', default=None)
     parser.add_argument('--dispatcher', default=None)
     parser.add_argument('-o', '--output', required=False)
     parser.add_argument('--keep-temps', action='store_true')
