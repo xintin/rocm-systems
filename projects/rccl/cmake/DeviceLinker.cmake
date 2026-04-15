@@ -27,9 +27,29 @@ find_program(DL_BUNDLER NAMES clang-offload-bundler
   HINTS "${_dl_compiler_dir}" "${_dl_compiler_dir}/../lib/llvm/bin"
         "${ROCM_PATH}/llvm/bin" REQUIRED)
 
-# ROCM_PATH is always set (by the user, TheRock, or defaulting to /opt/rocm).
-# Pass it through so amdclang++ can find HIP runtime headers in any layout.
-set(DL_ROCM_PATH_FLAG "--rocm-path=${ROCM_PATH}")
+# Derive --rocm-path for amdclang++ -x hip invocations.
+# Use ROCM_PATH if set and non-empty (standard installs, math-ci).
+# Otherwise derive from the compiler's location (TheRock sets ROCM_PATH="").
+if(ROCM_PATH)
+  set(DL_ROCM_PATH "${ROCM_PATH}")
+else()
+  get_filename_component(_dl_clang_real "${DL_CLANG}" REALPATH)
+  get_filename_component(_dl_clang_dir "${_dl_clang_real}" DIRECTORY)
+  foreach(_up ".." "../../../.." "../..")
+    get_filename_component(_candidate "${_dl_clang_dir}/${_up}" ABSOLUTE)
+    if(EXISTS "${_candidate}/include/hip")
+      set(DL_ROCM_PATH "${_candidate}")
+      break()
+    endif()
+  endforeach()
+endif()
+if(DL_ROCM_PATH)
+  set(DL_ROCM_PATH_FLAG "--rocm-path=${DL_ROCM_PATH}")
+  message(STATUS "Device Linker: --rocm-path=${DL_ROCM_PATH}")
+else()
+  set(DL_ROCM_PATH_FLAG "")
+  message(WARNING "Device Linker: could not determine --rocm-path, HIP runtime may not be found")
+endif()
 
 set(DEVICE_BUILD_DIR "${PROJECT_BINARY_DIR}/device_build")
 set(SPECIALIZED_DIR  "${GEN_DIR}/specialized")
@@ -206,13 +226,16 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
     LINKER_LANGUAGE RCCLDEV
   )
 
-  target_compile_options(${_dev_target} PRIVATE
+  set(_dev_compile_opts
     --arch=${DL_GPU_TARGET}
     --clang=${DL_CLANG}
-    --rocm-path=${ROCM_PATH}
     ${DL_OPT_FLAGS}
     -std=c++17
   )
+  if(DL_ROCM_PATH)
+    list(APPEND _dev_compile_opts --rocm-path=${DL_ROCM_PATH})
+  endif()
+  target_compile_options(${_dev_target} PRIVATE ${_dev_compile_opts})
   target_compile_definitions(${_dev_target} PRIVATE RCCL_DEVICE_LINKER)
   target_link_libraries(${_dev_target} PRIVATE rccl_device_defs)
 
@@ -261,7 +284,7 @@ foreach(DL_GPU_TARGET ${DL_GPU_TARGETS})
       --link
       --arch=${DL_GPU_TARGET}
       --clang=${DL_CLANG}
-      --rocm-path=${ROCM_PATH}
+      $<$<BOOL:${DL_ROCM_PATH}>:--rocm-path=${DL_ROCM_PATH}>
       --dispatcher=${HIPIFY_DIR}/src/device/common.cu.cpp
       ${_link_def_flags}
       ${_link_inc_flags}

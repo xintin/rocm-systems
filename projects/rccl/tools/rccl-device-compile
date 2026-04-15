@@ -415,6 +415,20 @@ def find_tool(name, hints, required=True):
     return None
 
 
+def _derive_rocm_path(compiler_dir):
+    """Derive --rocm-path from the compiler's filesystem location.
+    Searches upward for a directory containing include/hip."""
+    candidates = [
+        os.path.normpath(os.path.join(compiler_dir, '..')),
+        os.path.normpath(os.path.join(compiler_dir, '..', '..', '..', '..')),
+        os.path.normpath(os.path.join(compiler_dir, '..', '..')),
+    ]
+    for c in candidates:
+        if os.path.isdir(os.path.join(c, 'include', 'hip')):
+            return c
+    return None
+
+
 def discover_tools(clang_path):
     """Discover amdclang++ and ld.lld from the given compiler path."""
     if clang_path:
@@ -456,6 +470,13 @@ def run(cmd, description=""):
 # Compile mode: .cpp -> .o + .resources.json
 # ---------------------------------------------------------------------------
 
+def _resolve_rocm_path(args_rocm_path, clang):
+    """Resolve --rocm-path: use explicit value, or derive from compiler."""
+    if args_rocm_path:
+        return args_rocm_path
+    return _derive_rocm_path(os.path.dirname(os.path.realpath(clang)))
+
+
 def do_compile(args, forwarded_flags):
     clang, _ = discover_tools(args.clang)
     arch = args.arch
@@ -466,7 +487,8 @@ def do_compile(args, forwarded_flags):
     base = os.path.splitext(output)[0]
     json_out = base + '.resources.json'
 
-    rocm_path_flags = [f'--rocm-path={args.rocm_path}'] if args.rocm_path else []
+    rocm_path = _resolve_rocm_path(args.rocm_path, clang)
+    rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else []
 
     # Determine temp directory: alongside output if --keep-temps, else truly temp
     if keep_temps:
@@ -579,7 +601,8 @@ def do_link(args, forwarded_flags):
 
     try:
         # Step 2: Compile dispatcher to assembly
-        rocm_path_flags = [f'--rocm-path={args.rocm_path}'] if args.rocm_path else []
+        rocm_path = _resolve_rocm_path(args.rocm_path, clang)
+        rocm_path_flags = [f'--rocm-path={rocm_path}'] if rocm_path else []
         disp_compile_cmd = [
             clang,
             '-x', 'hip', '--cuda-device-only',
