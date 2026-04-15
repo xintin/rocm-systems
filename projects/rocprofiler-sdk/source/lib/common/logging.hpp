@@ -31,9 +31,7 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cstdio>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -50,11 +48,8 @@
 #define ROCP_INFO    LOG_IF(INFO, ::rocprofiler::common::logging_active())
 #define ROCP_WARNING LOG_IF(WARNING, ::rocprofiler::common::logging_active())
 
-// Falls back to stderr when logging is inactive
-#define ROCP_ERROR                                                                             \
-    (::rocprofiler::common::logging_active()                                                   \
-         ? google::LogMessage(__FILE__, __LINE__, google::GLOG_ERROR).stream()                  \
-         : ::rocprofiler::common::StderrStream(__FILE__, __LINE__).stream())
+// Silently dropped when logging is inactive (during teardown)
+#define ROCP_ERROR   LOG_IF(ERROR, ::rocprofiler::common::logging_active())
 
 // Always active — fatal errors should always be reported
 #define ROCP_FATAL  LOG(FATAL)
@@ -64,11 +59,7 @@
 #define ROCP_TRACE_IF(CONDITION)   LOG_IF(INFO, VLOG_IS_ON(ROCP_LOG_LEVEL_TRACE) && (CONDITION) && ::rocprofiler::common::logging_active())
 #define ROCP_INFO_IF(CONDITION)    LOG_IF(INFO, (CONDITION) && ::rocprofiler::common::logging_active())
 #define ROCP_WARNING_IF(CONDITION) LOG_IF(WARNING, (CONDITION) && ::rocprofiler::common::logging_active())
-#define ROCP_ERROR_IF(CONDITION)                                                               \
-    static_cast<void>(0),                                                                      \
-        !(CONDITION)                                                                           \
-            ? (void) 0                                                                         \
-            : google::logging::internal::LogMessageVoidify() & ROCP_ERROR
+#define ROCP_ERROR_IF(CONDITION)   LOG_IF(ERROR, (CONDITION) && ::rocprofiler::common::logging_active())
 #define ROCP_FATAL_IF(CONDITION)   LOG_IF(FATAL, (CONDITION))
 #define ROCP_DFATAL_IF(CONDITION)  DLOG_IF(FATAL, (CONDITION))
 
@@ -109,29 +100,6 @@ update_logging(const logging_config& cfg);
 /// Returns false before init_logging() and after the atexit handler runs.
 std::atomic<bool>&
 logging_active();
-
-/// Lightweight stream that writes to stderr on destruction.
-/// Used as a fallback for ROCP_ERROR when glog is not available.
-class StderrStream
-{
-    std::ostringstream oss_;
-    const char*        file_;
-    int                line_;
-
-public:
-    StderrStream(const char* file, int line)
-    : file_(file)
-    , line_(line)
-    {}
-
-    ~StderrStream()
-    {
-        auto s = oss_.str();
-        if(!s.empty()) fprintf(stderr, "[rocprofiler][%s:%d] %s\n", file_, line_, s.c_str());
-    }
-
-    std::ostringstream& stream() { return oss_; }
-};
 
 }  // namespace common
 }  // namespace rocprofiler

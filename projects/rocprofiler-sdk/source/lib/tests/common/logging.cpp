@@ -24,9 +24,6 @@
 
 #include <gtest/gtest.h>
 
-#include <unistd.h>
-#include <cstdio>
-#include <cstring>
 
 TEST(common, logging_active_after_init)
 {
@@ -56,67 +53,12 @@ TEST(common, logging_guard_drops_warning_when_inactive)
     rocprofiler::common::logging_active() = true;
 }
 
-TEST(common, stderr_stream_writes_to_stderr)
+TEST(common, logging_guard_drops_error_when_inactive)
 {
-    // Capture stderr output
-    int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
-
-    int saved_stderr = dup(STDERR_FILENO);
-    dup2(pipefd[1], STDERR_FILENO);
-
-    {
-        auto s = rocprofiler::common::StderrStream("test.cpp", 42);
-        s.stream() << "test message " << 123;
-    }  // destructor writes to stderr
-
-    // Flush and restore stderr
-    fflush(stderr);
-    dup2(saved_stderr, STDERR_FILENO);
-    close(saved_stderr);
-    close(pipefd[1]);
-
-    // Read captured output
-    char    buf[512] = {};
-    ssize_t n        = read(pipefd[0], buf, sizeof(buf) - 1);
-    close(pipefd[0]);
-
-    ASSERT_GT(n, 0);
-    buf[n] = '\0';
-
-    EXPECT_NE(strstr(buf, "test message 123"), nullptr)
-        << "Expected 'test message 123' in stderr output: " << buf;
-    EXPECT_NE(strstr(buf, "test.cpp"), nullptr) << "Expected 'test.cpp' in stderr output: " << buf;
-    EXPECT_NE(strstr(buf, "42"), nullptr) << "Expected '42' in stderr output: " << buf;
-}
-
-TEST(common, rocp_error_falls_back_to_stderr_when_inactive)
-{
-    // Capture stderr
-    int pipefd[2];
-    ASSERT_EQ(pipe(pipefd), 0);
-
-    int saved_stderr = dup(STDERR_FILENO);
-    dup2(pipefd[1], STDERR_FILENO);
-
     rocprofiler::common::logging_active() = false;
 
-    ROCP_ERROR << "fallback error message";
+    // ROCP_ERROR should be a no-op (no crash, no output)
+    ROCP_ERROR << "this error should be silently dropped";
 
     rocprofiler::common::logging_active() = true;
-
-    fflush(stderr);
-    dup2(saved_stderr, STDERR_FILENO);
-    close(saved_stderr);
-    close(pipefd[1]);
-
-    char    buf[512] = {};
-    ssize_t n        = read(pipefd[0], buf, sizeof(buf) - 1);
-    close(pipefd[0]);
-
-    ASSERT_GT(n, 0);
-    buf[n] = '\0';
-
-    EXPECT_NE(strstr(buf, "fallback error message"), nullptr)
-        << "Expected 'fallback error message' in stderr output: " << buf;
 }

@@ -36,10 +36,10 @@ atexit_logging_handler()
     // logging_active has been set to false (as happens in the SDK's atexit handler).
     rocprofiler::common::logging_active() = false;
 
-    // These must not crash:
+    // These must not crash — all are silently dropped when logging_active is false:
     ROCP_INFO << "info during atexit (should be dropped)";
     ROCP_WARNING << "warning during atexit (should be dropped)";
-    ROCP_ERROR << "error during atexit (should go to stderr)";
+    ROCP_ERROR << "error during atexit (should be dropped)";
     ROCP_TRACE << "trace during atexit (should be dropped)";
 }
 }  // namespace
