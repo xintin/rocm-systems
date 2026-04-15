@@ -38,11 +38,19 @@ namespace rocprofiler
 {
 namespace common
 {
+namespace
+{
+// Namespace-scope atomic avoids the __cxa_guard used by function-local statics.
+// A function-local static's guard interacts with __pthread_once_slow, which can
+// crash during static destruction if the guard is destroyed before the last caller.
+// Namespace-scope atomics have no guard and survive the entire process lifetime.
+std::atomic<bool> g_logging_active{false};
+}  // namespace
+
 std::atomic<bool>&
 logging_active()
 {
-    static std::atomic<bool> v{false};
-    return v;
+    return g_logging_active;
 }
 
 namespace
