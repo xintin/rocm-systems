@@ -65,11 +65,10 @@
 #define ROCP_INFO_IF(CONDITION)    LOG_IF(INFO, (CONDITION) && ::rocprofiler::common::logging_active())
 #define ROCP_WARNING_IF(CONDITION) LOG_IF(WARNING, (CONDITION) && ::rocprofiler::common::logging_active())
 #define ROCP_ERROR_IF(CONDITION)                                                               \
-    (!(CONDITION)                                                                              \
-         ? ::rocprofiler::common::NullStream::instance()                                       \
-         : ::rocprofiler::common::logging_active()                                             \
-               ? google::LogMessage(__FILE__, __LINE__, google::GLOG_ERROR).stream()            \
-               : ::rocprofiler::common::StderrStream(__FILE__, __LINE__).stream())
+    static_cast<void>(0),                                                                      \
+        !(CONDITION)                                                                           \
+            ? (void) 0                                                                         \
+            : google::logging::internal::LogMessageVoidify() & ROCP_ERROR
 #define ROCP_FATAL_IF(CONDITION)   LOG_IF(FATAL, (CONDITION))
 #define ROCP_DFATAL_IF(CONDITION)  DLOG_IF(FATAL, (CONDITION))
 
@@ -132,20 +131,6 @@ public:
     }
 
     std::ostringstream& stream() { return oss_; }
-};
-
-/// A no-op stream that discards all output. Used for disabled conditional macros.
-class NullStream
-{
-    std::ostringstream oss_;
-
-public:
-    static std::ostringstream& instance()
-    {
-        static thread_local std::ostringstream s;
-        s.str("");
-        return s;
-    }
 };
 
 }  // namespace common
