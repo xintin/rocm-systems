@@ -123,7 +123,7 @@ using backtrace_operation_map_t =
 
 struct client_data
 {
-    static constexpr size_t num_buffers  = 11;
+    static constexpr size_t num_buffers  = 12;
     static constexpr size_t num_contexts = 4;
 
     using buffer_name_info_t   = rocprofiler::sdk::buffer_name_info_t<std::string_view>;
@@ -137,9 +137,9 @@ struct client_data
     rocprofiler_client_id_t*                  client_id                 = nullptr;
     rocprofiler_client_finalize_t             client_fini               = nullptr;
     rocprofiler_context_id_t                  primary_ctx               = { 0 };
-    rocprofiler_context_id_t                  counter_ctx               = { 0 };
     rocprofiler_context_id_t                  code_object_ctx           = { 0 };
     rocprofiler_context_id_t                  control_ctx               = { 0 };
+    rocprofiler_context_id_t                  sdk_pmc_ctx               = { 0 };
     rocprofiler_buffer_id_t                   kernel_dispatch_buffer    = { 0 };
     rocprofiler_buffer_id_t                   scratch_memory_buffer     = { 0 };
     rocprofiler_buffer_id_t                   memory_copy_buffer        = { 0 };
@@ -151,6 +151,7 @@ struct client_data
     rocprofiler_buffer_id_t                   kfd_event_queue_buffer    = { 0 };
     rocprofiler_buffer_id_t                   kfd_event_unmap_buffer    = { 0 };
     rocprofiler_buffer_id_t                   kfd_event_dropped_buffer  = { 0 };
+    rocprofiler_buffer_id_t                   sdk_pmc_buffer            = { 0 };
     std::vector<tool_agent>                   cpu_agents                = {};
     std::vector<tool_agent>                   gpu_agents                = {};
     std::vector<hardware_counter_info>        events_info               = {};
@@ -183,7 +184,7 @@ struct client_data
 inline client_data::context_id_vec_t
 client_data::get_all_contexts() const
 {
-    return context_id_vec_t{ primary_ctx, counter_ctx, code_object_ctx, control_ctx };
+    return context_id_vec_t{ primary_ctx, code_object_ctx, control_ctx, sdk_pmc_ctx };
 }
 
 inline client_data::context_id_vec_t
@@ -191,7 +192,6 @@ client_data::get_main_contexts() const
 {
     return context_id_vec_t{
         primary_ctx,
-        counter_ctx,
     };
 }
 
@@ -215,7 +215,7 @@ client_data::get_buffers() const
                             counter_collection_buffer, kfd_page_fault_buffer,
                             kfd_page_migrate_buffer,   kfd_queue_buffer,
                             kfd_event_queue_buffer,    kfd_event_unmap_buffer,
-                            kfd_event_dropped_buffer };
+                            kfd_event_dropped_buffer,  sdk_pmc_buffer };
 }
 
 inline const rocprofsys_agent_t*

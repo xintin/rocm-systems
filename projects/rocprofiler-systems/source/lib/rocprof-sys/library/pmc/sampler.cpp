@@ -6,7 +6,12 @@
 #include "library/pmc/collectors/gpu/cache_policy.hpp"
 #include "library/pmc/collectors/gpu/collector.hpp"
 #include "library/pmc/collectors/gpu/perfetto_policy.hpp"
+#include "library/pmc/collectors/sdk_pmc/cache_policy.hpp"
+#include "library/pmc/collectors/sdk_pmc/collector.hpp"
+#include "library/pmc/collectors/sdk_pmc/perfetto_policy.hpp"
 #include "library/pmc/device_providers/amd_smi/provider.hpp"
+#include "library/pmc/device_providers/rocprofiler_sdk/provider.hpp"
+#include "library/rocprofiler-sdk/sdk_pmc_bridge.hpp"
 
 #if defined(ROCPROFSYS_BUILD_AINIC)
 #    include "library/pmc/collectors/nic/cache_policy.hpp"
@@ -64,6 +69,13 @@ struct gpu_production_config
     using CacheApi    = collectors::gpu::cache_policy;
 };
 
+struct sdk_pmc_production_config
+{
+    using SettingsApi = collectors::settings_policy;
+    using PerfettoApi = collectors::sdk_pmc::perfetto_policy;
+    using CacheApi    = collectors::sdk_pmc::cache_policy;
+};
+
 #if defined(ROCPROFSYS_BUILD_AINIC)
 struct nic_production_config
 {
@@ -77,13 +89,22 @@ using provider_factory_t =
     device_providers::amd_smi::provider_factory<drivers::amd_smi::driver_factory>;
 using provider_t      = provider_factory_t::provider_t;
 using gpu_collector_t = collectors::gpu::collector<provider_t, gpu_production_config>;
+
+using sdk_pmc_provider_factory_t = device_providers::rocprofiler_sdk::provider_factory<
+    drivers::rocprofiler_sdk::driver_factory>;
+using sdk_pmc_provider_t = sdk_pmc_provider_factory_t::provider_t;
+using sdk_pmc_collector_t =
+    collectors::sdk_pmc::collector<sdk_pmc_provider_t, sdk_pmc_production_config>;
+
 #if defined(ROCPROFSYS_BUILD_AINIC)
 using nic_collector_t = collectors::nic::collector<provider_t, nic_production_config>;
 #endif
 
 std::shared_ptr<provider_t> g_device_provider;
 
-std::unique_ptr<gpu_collector_t> g_gpu_collector;
+std::unique_ptr<gpu_collector_t>     g_gpu_collector;
+std::shared_ptr<sdk_pmc_provider_t>  g_sdk_pmc_provider;
+std::unique_ptr<sdk_pmc_collector_t> g_sdk_pmc_collector;
 #if defined(ROCPROFSYS_BUILD_AINIC)
 std::unique_ptr<nic_collector_t> g_nic_collector;
 #endif
@@ -117,6 +138,28 @@ sample()
     if(pmc::get_state() != State::Active)
     {
         return;
+    }
+
+    // Lazy init: SDK PMC collector is created on first sample() call where the
+    // bridge is ready. This is necessary because both setup() and config() run
+    // before tool_init() populates the bridge.
+    if(!g_sdk_pmc_collector &&
+       rocprofsys::rocprofiler_sdk::sdk_pmc_bridge::instance().initialized)
+    {
+        try
+        {
+            g_sdk_pmc_provider = sdk_pmc_provider_factory_t::create();
+            g_sdk_pmc_collector =
+                std::make_unique<sdk_pmc_collector_t>(g_sdk_pmc_provider);
+            g_sdk_pmc_collector->setup();
+            g_sdk_pmc_collector->config();
+            g_collector_slices.emplace_back(*g_sdk_pmc_collector);
+            LOG_DEBUG("Collector initialized (lazy), total slices={}",
+                      g_collector_slices.size());
+        } catch(const std::runtime_error& _sdk_e)
+        {
+            LOG_ERROR("Failed to initialize SDK PMC collector: {}", _sdk_e.what());
+        }
     }
 
     auto timestamp = static_cast<int64_t>(tim::get_clock_real_now<size_t, std::nano>());
@@ -234,6 +277,8 @@ postfork_child_cleanup()
     }
     g_collector_slices.clear();
     g_gpu_collector.reset();
+    g_sdk_pmc_collector.reset();
+    g_sdk_pmc_provider.reset();
 #if defined(ROCPROFSYS_BUILD_AINIC)
     g_nic_collector.reset();
 #endif

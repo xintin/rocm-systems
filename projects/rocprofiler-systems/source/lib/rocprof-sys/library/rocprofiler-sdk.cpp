@@ -21,10 +21,10 @@
 #include "library/pmc/sampler.hpp"
 #include "library/process_sampler.hpp"
 #include "library/rocprofiler-sdk.hpp"
-#include "library/rocprofiler-sdk/counters.hpp"
 #include "library/rocprofiler-sdk/fwd.hpp"
 #include "library/rocprofiler-sdk/kfd_events.hpp"
 #include "library/rocprofiler-sdk/rccl.hpp"
+#include "library/rocprofiler-sdk/sdk_pmc_bridge.hpp"
 #include "library/rocprofiler-sdk/trace_control.hpp"
 #include "library/thread_info.hpp"
 #include "library/tracing.hpp"
@@ -2131,160 +2131,31 @@ tool_tracing_buffered(rocprofiler_context_id_t /*context*/,
     }
 }
 
-auto&
-get_counter_dispatch_data()
-{
-    static auto _v =
-        container::stable_vector<rocprofiler_dispatch_counting_service_data_t>{};
-    return _v;
-}
-
-auto&
-get_counter_dispatch_records()
-{
-    static auto _v = std::vector<counter_dispatch_record>{};
-    return _v;
-}
-
-using counter_storage_map_t =
-    std::unordered_map<rocprofiler_counter_id_t, counter_storage>;
-using agent_counter_storage_map_t =
-    std::unordered_map<rocprofiler_agent_id_t, counter_storage_map_t>;
-
-auto*&
-get_counter_storage()
-{
-    static auto* _v = new agent_counter_storage_map_t{};
-    return _v;
-}
+// --- SDK PMC Device Counting Service ---
 
 void
-flush_counter_storage_outputs()
+sdk_pmc_set_profile(rocprofiler_context_id_t context_id, rocprofiler_agent_id_t agent_id,
+                    rocprofiler_device_counting_agent_cb_t set_config,
+                    void* /*user_data*/)
 {
-    auto* _agent_counter_storage = get_counter_storage();
-    if(!_agent_counter_storage) return;
-
-    auto _cleanup_keys = std::vector<std::pair<std::string, const counter_storage*>>{};
-    for(const auto& [agent_id, counter_map] : *_agent_counter_storage)
+    auto& bridge = rocprofsys::rocprofiler_sdk::sdk_pmc_bridge::instance();
+    for(const auto& agent_info : bridge.agents)
     {
-        static_cast<void>(agent_id);
-        for(const auto& [counter_id, storage] : counter_map)
+        if(agent_info.agent_id.handle == agent_id.handle)
         {
-            static_cast<void>(counter_id);
-            _cleanup_keys.emplace_back(storage.storage_name + "cleanup", &storage);
-        }
-    }
-
-    std::sort(_cleanup_keys.begin(), _cleanup_keys.end(),
-              [](const auto& lhs, const auto& rhs) { return *lhs.second < *rhs.second; });
-
-    for(const auto& [cleanup_key, storage] : _cleanup_keys)
-    {
-        if(!storage || !storage->storage) continue;
-        if(storage->manager)
-        {
-            storage->manager->cleanup(cleanup_key);
-        }
-        else
-        {
-            // No tim::manager at construction (add_cleanup was skipped); still flush
-            // timemory storage once at shutdown.
-            counter_storage::write(storage->storage.get(), storage->metric_name,
-                                   storage->metric_description);
+            set_config(context_id, agent_info.profile_config);
+            return;
         }
     }
 }
 
 void
-counter_record_callback(rocprofiler_dispatch_counting_service_data_t dispatch_data,
-                        rocprofiler_record_counter_t* record_data, size_t record_count,
-                        rocprofiler_user_data_t /*user_data*/,
-                        void* /*callback_data_arg*/)
+sdk_pmc_buffer_callback(rocprofiler_context_id_t /*context*/,
+                        rocprofiler_buffer_id_t /*buffer_id*/,
+                        rocprofiler_record_header_t** /*headers*/, size_t /*num_headers*/,
+                        void* /*user_data*/, uint64_t /*drop_count*/)
 {
-    auto* _agent_counter_storage = get_counter_storage();
-    if(!_agent_counter_storage) return;
-
-    static auto _mtx = std::mutex{};
-    auto        _lk  = std::unique_lock<std::mutex>{ _mtx };
-
-    auto _dispatch_id = dispatch_data.dispatch_info.dispatch_id;
-    auto _agent_id    = dispatch_data.dispatch_info.agent_id;
-    auto _scope       = scope::get_default();
-    auto _interval    = timing_interval{};
-    auto _aggregate =
-        std::unordered_map<rocprofiler_counter_id_t, rocprofiler_record_counter_t>{};
-    for(size_t i = 0; i < record_count; ++i)
-    {
-        auto _counter_id = rocprofiler_counter_id_t{};
-        ROCPROFILER_CALL(
-            rocprofiler_query_record_counter_id(record_data[i].id, &_counter_id));
-
-        if(!_aggregate.emplace(_counter_id, record_data[i]).second)
-        {
-            _aggregate[_counter_id].counter_value += record_data[i].counter_value;
-        }
-    }
-
-    if(_agent_counter_storage->count(_agent_id) == 0)
-        _agent_counter_storage->emplace(_agent_id, counter_storage_map_t{});
-
-    if(get_kernel_dispatch_timestamps().count(_dispatch_id) > 0)
-    {
-        _interval = get_kernel_dispatch_timestamps().at(_dispatch_id);
-        get_kernel_dispatch_timestamps().erase(_dispatch_id);
-    }
-
-    for(const auto& itr : _aggregate)
-    {
-        if(_agent_counter_storage->at(_agent_id).count(itr.first) == 0)
-        {
-            const auto* _agent = tool_data->get_gpu_tool_agent(_agent_id);
-            const auto* _info  = tool_data->get_tool_counter_info(_agent_id, itr.first);
-
-            if(!_agent)
-            {
-                LOG_CRITICAL("unable to find tool agent for agent (id={})",
-                             _agent_id.handle);
-                ::rocprofsys::set_state(::rocprofsys ::State ::Finalized);
-                ::std ::abort();
-            }
-            if(!_info)
-            {
-                LOG_CRITICAL("unable to find counter info for counter (id={}) on "
-                             "agent (id={})",
-                             itr.first.handle, _agent_id.handle);
-                ::rocprofsys::set_state(::rocprofsys ::State ::Finalized);
-                ::std ::abort();
-            }
-
-            auto _dev_id = static_cast<uint32_t>(_agent->device_id);
-
-            _agent_counter_storage->at(_agent_id).emplace(
-                itr.first, counter_storage{ tool_data, _dev_id, 0, _info->name });
-        }
-
-        auto _event = counter_event{ counter_dispatch_record{
-            &dispatch_data, _dispatch_id, itr.first, itr.second } };
-
-        _agent_counter_storage->at(_agent_id).at(itr.first)(_event, _interval, _scope);
-    }
-}
-
-void
-dispatch_counting_service_callback(
-    rocprofiler_dispatch_counting_service_data_t dispatch_data,
-    rocprofiler_profile_config_id_t* config, rocprofiler_user_data_t* /*user_data*/,
-    void*                            callback_data_arg)
-{
-    auto* _data = as_client_data(callback_data_arg);
-    if(!_data || !config) return;
-
-    if(auto itr =
-           _data->agent_counter_profiles.find(dispatch_data.dispatch_info.agent_id);
-       itr != _data->agent_counter_profiles.end() && itr->second)
-    {
-        *config = *itr->second;
-    }
+    // No-op: we use synchronous polling via rocprofiler_sample_device_counting_service
 }
 
 bool
@@ -2686,28 +2557,70 @@ tool_init(rocprofiler_client_finalize_t fini_func, void* user_data)
     }
 #endif
 
-    if(!_counter_events.empty())
+    // --- SDK PMC Device Counting Service (polled hardware counters) ---
+    LOG_DEBUG("tool_init: counter_events={}, gpu_agents={}", _counter_events.size(),
+              _data->gpu_agents.size());
+
+    if(!_counter_events.empty() && !_data->gpu_agents.empty())
     {
+        // Resolve counter names to counter IDs per agent
         for(const auto& itr : _data->gpu_agents)
         {
             const auto& _agent_id = rocprofiler_agent_id_t{ itr.agent->handle };
-            _data->agent_events.emplace(
-                _agent_id, create_agent_profile(_agent_id, _counter_events, _data));
+            auto resolved = create_agent_profile(_agent_id, _counter_events, _data);
+            _data->agent_events.emplace(_agent_id, resolved);
+            LOG_DEBUG("Agent {} (device {}): resolved {} counter IDs", _agent_id.handle,
+                      itr.device_id, resolved.size());
         }
 
-        ROCPROFILER_CALL(rocprofiler_create_context(&_data->counter_ctx));
+        auto& bridge = rocprofsys::rocprofiler_sdk::sdk_pmc_bridge::instance();
 
-        auto _operations = std::array<rocprofiler_tracing_operation_t, 1>{
-            ROCPROFILER_KERNEL_DISPATCH_COMPLETE,
-        };
+        ROCPROFILER_CALL(rocprofiler_create_context(&_data->sdk_pmc_ctx));
+        LOG_DEBUG("Created context handle={}", _data->sdk_pmc_ctx.handle);
 
-        ROCPROFILER_CALL(rocprofiler_configure_callback_tracing_service(
-            _data->counter_ctx, ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH,
-            _operations.data(), _operations.size(), tool_tracing_callback, _data));
+        constexpr auto sdk_pmc_buffer_size = 4 * 4096;
+        constexpr auto sdk_pmc_watermark   = 3 * 4096;
+        ROCPROFILER_CALL(rocprofiler_create_buffer(
+            _data->sdk_pmc_ctx, sdk_pmc_buffer_size, sdk_pmc_watermark,
+            ROCPROFILER_BUFFER_POLICY_LOSSLESS, sdk_pmc_buffer_callback, nullptr,
+            &_data->sdk_pmc_buffer));
+        LOG_DEBUG("Created buffer handle={}", _data->sdk_pmc_buffer.handle);
 
-        ROCPROFILER_CALL(rocprofiler_configure_callback_dispatch_counting_service(
-            _data->counter_ctx, dispatch_counting_service_callback, _data,
-            counter_record_callback, _data));
+        for(const auto& itr : _data->gpu_agents)
+        {
+            const auto _agent_id = rocprofiler_agent_id_t{ itr.agent->handle };
+
+            auto profile_it = _data->agent_counter_profiles.find(_agent_id);
+            if(profile_it == _data->agent_counter_profiles.end() ||
+               !profile_it->second.has_value())
+            {
+                LOG_DEBUG("Agent {} — no profile config, skipping", _agent_id.handle);
+                continue;
+            }
+
+            LOG_DEBUG("Agent {} (device {}): profile_config={}", _agent_id.handle,
+                      itr.device_id, profile_it->second.value().handle);
+
+            bridge.agents.push_back(rocprofsys::rocprofiler_sdk::sdk_pmc_agent_info{
+                _agent_id, profile_it->second.value(), itr.device_id });
+
+            ROCPROFILER_CALL(rocprofiler_configure_device_counting_service(
+                _data->sdk_pmc_ctx, _data->sdk_pmc_buffer, _agent_id, sdk_pmc_set_profile,
+                nullptr));
+        }
+
+        if(!bridge.agents.empty())
+        {
+            bridge.context     = _data->sdk_pmc_ctx;
+            bridge.buffer      = _data->sdk_pmc_buffer;
+            bridge.initialized = true;
+            LOG_DEBUG("Bridge initialized: context={}, buffer={}, agents={}",
+                      bridge.context.handle, bridge.buffer.handle, bridge.agents.size());
+        }
+        else
+        {
+            LOG_DEBUG("No agents configured — bridge NOT initialized");
+        }
     }
 
     for(const auto& itr : _data->get_buffers())
@@ -2778,14 +2691,6 @@ finalize_sdk_common()
     stop();
 
     if(config::get_use_process_sampling() && config::get_use_amd_smi()) pmc::shutdown();
-
-    if(get_counter_storage())
-    {
-        flush_counter_storage_outputs();
-        get_counter_storage()->clear();
-        delete get_counter_storage();
-        get_counter_storage() = nullptr;
-    }
 }
 
 void
@@ -2802,30 +2707,6 @@ tool_fini(void* callback_data)
     _data->client_fini = nullptr;
     delete tool_data;
     tool_data = nullptr;
-}
-
-void
-flush_counter_tracks_to_zero(rocprofiler_timestamp_t timestamp)
-{
-    // Get current timestamp if not provided
-    if(timestamp == 0)
-    {
-        ROCPROFILER_CALL(rocprofiler_get_timestamp(&timestamp));
-    }
-
-    auto* storage = get_counter_storage();
-    if(!storage)
-    {
-        return;
-    }
-
-    for(auto& [agent_id, counter_map] : *storage)
-    {
-        for(auto& [counter_id, cs] : counter_map)
-        {
-            cs.write_zero(timestamp);
-        }
-    }
 }
 
 }  // namespace
@@ -2895,8 +2776,6 @@ stop()
 void
 resume()
 {
-    flush_counter_tracks_to_zero(0);
-
     if(!tool_data) return;
     start_context(tool_data->get_main_contexts());
 }
@@ -2906,8 +2785,6 @@ pause()
 {
     if(!tool_data) return;
     stop_context(tool_data->get_main_contexts());
-
-    flush_counter_tracks_to_zero(0);
 }
 
 std::vector<hardware_counter_info>
