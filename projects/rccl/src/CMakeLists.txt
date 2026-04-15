@@ -887,6 +887,14 @@ if(ENABLE_DEVICE_LINKER)
   # compile device code in host-only .cc files.
   target_link_libraries(rccl PRIVATE hip::host)
   target_compile_options(rccl PRIVATE -x hip)
+  # api_trace.c exists only to include api_trace.h under strict C rules; global
+  # -x hip makes Clang treat it as C++ and hits #error there. Per-file -x c is
+  # appended after target flags so this unit is compiled as C (same driver).
+  set_source_files_properties(
+    "${HIPIFY_DIR}/src/misc/api_trace.c"
+    PROPERTIES
+      COMPILE_OPTIONS "-x;c"
+  )
 else()
   target_link_libraries(rccl PRIVATE hip::device)
 endif()
