@@ -45,6 +45,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,7 +58,12 @@ namespace hotswap {
 
 struct AgentGfxRevision;
 
-using OwnedElfBuffer = std::unique_ptr<void, decltype(&std::free)>;
+// Owns a rewritten/retargeted ELF buffer. The deleter is type-erased so the
+// same handle can wrap either a heap allocation (freed with std::free) or a
+// read-only mmap of a disk-cache entry (released with munmap). std::free is
+// implicitly convertible to this deleter, so existing
+// `OwnedElfBuffer(ptr, &std::free)` call sites keep compiling.
+using OwnedElfBuffer = std::unique_ptr<void, std::function<void(void*)>>;
 
 struct CodeObjectView {
   const void* data = nullptr;
@@ -93,10 +99,26 @@ struct LoadAgentCodeObjectCallbacks {
 
 std::string GetCodeObjectIsaName(const void* elf_data, size_t elf_size);
 
+// Derive the code object's canonical target-id (e.g.
+// "amdgcn-amd-amdhsa--gfx1250") directly from the ELF (e_flags + code object
+// version) using the loader's own AmdHsaCode parser, without loading COMGR or
+// copying the whole object. Returns an empty string if the bytes are not a
+// parseable AMDGPU code object. This is the fast path used to keep COMGR (and
+// its dlopen + full-buffer copy) off the cache-hit path.
+std::string GetCodeObjectIsaNameFromElf(const void* elf_data, size_t elf_size);
+
 bool RetargetCodeObject(const void* elf_data, size_t elf_size,
                         const char* source_isa, const char* target_isa,
                         OwnedElfBuffer* out_elf_buffer, size_t* out_elf_size,
                         bool request_entry_trampolines = false);
+
+// Populate the in-memory and disk retarget caches for a code object without
+// loading it onto a device. Used by the bring-up warm-up path so the one-time
+// COMGR retarget is paid off the application critical path. Returns true if a
+// (successful) cache entry exists after the call. Safe to call concurrently
+// with normal loads; duplicate work is coalesced.
+bool WarmHotswapCache(const void* elf_data, size_t elf_size,
+                      const std::string& uri, hsa_agent_t agent);
 
 bool TryRetargetCodeObject(const CodeObjectView& code_object, hsa_agent_t agent,
                            OwnedElfBuffer* out_elf_buffer,

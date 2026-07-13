@@ -45,14 +45,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -61,11 +64,14 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
 
+#include "core/inc/amd_hsa_code.hpp"
 #include "core/inc/hotswap_gfx_query.hpp"
 #include "core/util/os.h"
 
@@ -97,19 +103,145 @@ uint64_t FnvHash(const void* data, size_t size) {
   return hash;
 }
 
-uint64_t ComputeRetargetCacheKey(const void* elf_data, size_t elf_size,
-                                 const std::string& source_isa,
-                                 const std::string& target_isa,
-                                 bool entry_trampolines) {
-  uint64_t hash = FnvHash(elf_data, elf_size);
-  hash ^= FnvHash(source_isa.data(), source_isa.size()) * 31;
-  hash ^= FnvHash(target_isa.data(), target_isa.size()) * 37;
-  hash ^= entry_trampolines ? 0xDEADBEEF12345678ULL : 0x0ULL;
-  return hash;
+// Cheap fingerprint over the first and last 4 KB plus the size. Used to guard a
+// memoized full content hash against pointer reuse (ABA) without rescanning the
+// whole object on repeat loads.
+uint64_t Fingerprint8k(const void* data, size_t size) {
+  const auto* b = static_cast<const uint8_t*>(data);
+  const size_t head = size < 4096 ? size : 4096;
+  uint64_t h = FnvHash(b, head);
+  if (size > head) {
+    const size_t tail = (size - head) < 4096 ? (size - head) : 4096;
+    h ^= FnvHash(b + size - tail, tail) * 1099511628211ULL;
+  }
+  h ^= static_cast<uint64_t>(size) * 2654435761ULL;
+  return h;
+}
+
+struct ContentHashMemoEntry {
+  uint64_t fingerprint = 0;
+  uint64_t full_hash = 0;
+};
+
+std::mutex g_content_hash_memo_mutex;
+std::unordered_map<uintptr_t, ContentHashMemoEntry> g_content_hash_memo;
+
+// Full FNV-1a content hash, memoized by data pointer and guarded by an 8 KB
+// fingerprint so the 4 per-GPU loads of the same in-memory object hash it once.
+uint64_t ContentHashMemoized(const void* data, size_t size) {
+  const uint64_t fp = Fingerprint8k(data, size);
+  const uintptr_t k = reinterpret_cast<uintptr_t>(data);
+  {
+    std::scoped_lock lock(g_content_hash_memo_mutex);
+    auto it = g_content_hash_memo.find(k);
+    if (it != g_content_hash_memo.end() && it->second.fingerprint == fp) {
+      return it->second.full_hash;
+    }
+  }
+  const uint64_t full = FnvHash(data, size);
+  {
+    std::scoped_lock lock(g_content_hash_memo_mutex);
+    g_content_hash_memo[k] = ContentHashMemoEntry{fp, full};
+  }
+  return full;
+}
+
+bool ForceContentHashKey() {
+  static const bool force = os::IsEnvVarSet("HSA_HOTSWAP_CACHE_CONTENT_HASH") &&
+                            os::GetEnvVar("HSA_HOTSWAP_CACHE_CONTENT_HASH") != "0";
+  return force;
+}
+
+std::string PercentDecode(const std::string& s) {
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '%' && i + 2 < s.size()) {
+      const int hi = hex(s[i + 1]);
+      const int lo = hex(s[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        out.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(s[i]);
+  }
+  return out;
+}
+
+// If uri is a "file://" URI, decode the path (dropping any '#fragment') and
+// stat the backing file. Returns false for non-file URIs (e.g. "memory://") or
+// on any error, so the caller falls back to a content hash.
+bool StatUriFile(const std::string& uri, uint64_t* mtime, uint64_t* size) {
+#if defined(_WIN32) || defined(_WIN64)
+  (void)uri;
+  (void)mtime;
+  (void)size;
+  return false;
+#else
+  constexpr char kFilePrefix[] = "file://";
+  constexpr size_t kFilePrefixLen = sizeof(kFilePrefix) - 1;
+  if (uri.compare(0, kFilePrefixLen, kFilePrefix) != 0) {
+    return false;
+  }
+  std::string rest = uri.substr(kFilePrefixLen);
+  const size_t frag = rest.find('#');
+  if (frag != std::string::npos) {
+    rest = rest.substr(0, frag);
+  }
+  const std::string path = PercentDecode(rest);
+  struct stat st = {};
+  if (path.empty() || ::stat(path.c_str(), &st) != 0) {
+    return false;
+  }
+  *mtime = static_cast<uint64_t>(st.st_mtime);
+  *size = static_cast<uint64_t>(st.st_size);
+  return true;
+#endif
+}
+
+// Compute the retarget cache key. For file-backed code objects (the common
+// case: HIP modules, RCCL device libs) this uses (uri, file mtime, file size,
+// object size) and never scans the object, avoiding a full hash of a large
+// (~578 MB) ELF on every load. Memory-backed objects (or an unstatable path)
+// fall back to a memoized content hash. HSA_HOTSWAP_CACHE_CONTENT_HASH=1 forces
+// the content hash everywhere.
+uint64_t ComputeRetargetCacheKeyFast(const CodeObjectView& code_object,
+                                     const std::string& source_isa,
+                                     const std::string& target_isa,
+                                     bool entry_trampolines) {
+  uint64_t identity;
+  uint64_t mtime = 0;
+  uint64_t fsize = 0;
+  if (!ForceContentHashKey() && !code_object.uri.empty() &&
+      StatUriFile(code_object.uri, &mtime, &fsize)) {
+    identity = FnvHash(code_object.uri.data(), code_object.uri.size());
+    identity ^= mtime * 2654435761ULL;
+    identity ^= fsize * 40503ULL;
+    identity ^= static_cast<uint64_t>(code_object.size) * 2246822519ULL;
+  } else {
+    identity = ContentHashMemoized(code_object.data, code_object.size);
+  }
+  identity ^= FnvHash(source_isa.data(), source_isa.size()) * 31;
+  identity ^= FnvHash(target_isa.data(), target_isa.size()) * 37;
+  identity ^= entry_trampolines ? 0xDEADBEEF12345678ULL : 0x0ULL;
+  return identity;
 }
 
 struct CachedRetargetResult {
   bool succeeded = false;
+  // When true the payload lives only in the disk tier (elf_bytes is null); the
+  // lookup falls through to the disk tier and mmaps it zero-copy instead of
+  // holding a second in-memory copy. When elf_bytes is set (disk cache off, or
+  // a memory-backed object) callers copy from it directly.
+  bool on_disk = false;
   // Ref-counted so callers can grab a cheap handle under the mutex
   // and copy into the output buffer after releasing it.
   std::shared_ptr<std::vector<uint8_t>> elf_bytes;
@@ -119,6 +251,24 @@ constexpr size_t kMaxRetargetCacheEntries = 256;
 
 std::mutex g_retarget_cache_mutex;
 std::unordered_map<uint64_t, CachedRetargetResult> g_retarget_cache;
+
+// -- Single-flight coordination ----------------------------------------------
+//
+// Multiple threads (e.g. the 4 per-GPU loads of one code object, or a bring-up
+// warm-up thread racing the first real load) can miss the cache for the same
+// key simultaneously. Without coordination each would run the full COMGR
+// retarget. This lets exactly one thread ("the winner") run COMGR while the
+// others wait, then re-check the now-populated cache. Coalescing is keyed by
+// the same content/identity key as the cache itself.
+
+struct InflightRetarget {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool done = false;
+};
+
+std::mutex g_inflight_mutex;
+std::unordered_map<uint64_t, std::shared_ptr<InflightRetarget>> g_inflight;
 
 // Path of the COMGR library that actually loaded; set by GetComgrApi. Folded
 // into the disk-cache salt so a toolchain swap invalidates persisted entries.
@@ -226,37 +376,14 @@ std::string DiskCachePath(const std::string& dir, uint64_t key, uint64_t salt) {
   return DiskCacheSubdir(dir, salt) + buf;
 }
 
-std::shared_ptr<std::vector<uint8_t>> ReadDiskCache(const std::string& path, uint64_t salt) {
-  std::FILE* f = std::fopen(path.c_str(), "rb");
-  if (!f) {
-    return nullptr;
-  }
-  std::shared_ptr<std::vector<uint8_t>> result;
-  DiskCacheHeader hdr = {};
-  if (std::fread(&hdr, sizeof(hdr), 1, f) == 1 &&
-      std::memcmp(hdr.magic, kDiskCacheMagic, sizeof(hdr.magic)) == 0 &&
-      hdr.format_version == kDiskCacheFormatVersion && hdr.comgr_salt == salt &&
-      hdr.payload_size > 0) {
-    try {
-      auto bytes = std::make_shared<std::vector<uint8_t>>(hdr.payload_size);
-      if (std::fread(bytes->data(), 1, hdr.payload_size, f) == hdr.payload_size) {
-        result = std::move(bytes);
-      }
-    } catch (const std::bad_alloc&) {
-      result = nullptr;
-    }
-  }
-  std::fclose(f);
-  return result;
-}
-
-void WriteDiskCache(const std::string& dir, uint64_t key, uint64_t salt, const void* data,
+// Returns true iff the entry was atomically published to disk.
+bool WriteDiskCache(const std::string& dir, uint64_t key, uint64_t salt, const void* data,
                     size_t size) {
   if (dir.empty() || !data || size == 0) {
-    return;
+    return false;
   }
   if (!MakeDirs(DiskCacheSubdir(dir, salt))) {
-    return;
+    return false;
   }
   const std::string final_path = DiskCachePath(dir, key, salt);
   char suffix[64];
@@ -266,7 +393,7 @@ void WriteDiskCache(const std::string& dir, uint64_t key, uint64_t salt, const v
 
   std::FILE* f = std::fopen(tmp_path.c_str(), "wb");
   if (!f) {
-    return;
+    return false;
   }
   DiskCacheHeader hdr = {};
   std::memcpy(hdr.magic, kDiskCacheMagic, sizeof(hdr.magic));
@@ -281,7 +408,53 @@ void WriteDiskCache(const std::string& dir, uint64_t key, uint64_t salt, const v
   // Atomic publish: a partial writer never exposes a truncated entry.
   if (!ok || ::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
     ::remove(tmp_path.c_str());
+    return false;
   }
+  return true;
+}
+
+// Zero-copy read of a disk-cache entry: mmap the whole file read-only, validate
+// the header in place, and return an OwnedElfBuffer whose pointer aims at the
+// ELF payload and whose deleter munmaps the mapping. No 578 MB heap copy and no
+// eager read -- the OS pages the ELF in on demand and shares the physical pages
+// across every GPU load and process that maps the same file. Returns a null
+// buffer (with size 0) on any failure so the caller can fall through.
+OwnedElfBuffer MmapDiskCache(const std::string& path, uint64_t salt, size_t* out_size) {
+  *out_size = 0;
+  OwnedElfBuffer none(nullptr, &std::free);
+
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    return none;
+  }
+  struct stat st = {};
+  if (::fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(DiskCacheHeader))) {
+    ::close(fd);
+    return none;
+  }
+  const size_t map_len = static_cast<size_t>(st.st_size);
+  void* base = ::mmap(nullptr, map_len, PROT_READ, MAP_PRIVATE, fd, 0);
+  ::close(fd);  // mapping keeps its own reference to the file
+  if (base == MAP_FAILED) {
+    return none;
+  }
+
+  const auto* hdr = static_cast<const DiskCacheHeader*>(base);
+  if (std::memcmp(hdr->magic, kDiskCacheMagic, sizeof(hdr->magic)) != 0 ||
+      hdr->format_version != kDiskCacheFormatVersion || hdr->comgr_salt != salt ||
+      hdr->payload_size == 0 ||
+      hdr->payload_size > map_len - sizeof(DiskCacheHeader)) {
+    ::munmap(base, map_len);
+    return none;
+  }
+
+  void* payload = static_cast<char*>(base) + sizeof(DiskCacheHeader);
+  const size_t payload_size = static_cast<size_t>(hdr->payload_size);
+  // The deleter ignores its argument (the payload pointer) and unmaps the
+  // captured mapping base, so the ELF pointer can be offset past the header.
+  OwnedElfBuffer mapped(payload, [base, map_len](void*) { ::munmap(base, map_len); });
+  *out_size = payload_size;
+  return mapped;
 }
 #endif  // !_WIN32 && !_WIN64
 
@@ -563,6 +736,25 @@ std::string GetCodeObjectIsaName(const void* elf_data, size_t elf_size) {
   return isa;
 }
 
+std::string GetCodeObjectIsaNameFromElf(const void* elf_data, size_t elf_size) {
+  if (!elf_data || elf_size == 0) {
+    return {};
+  }
+  // AmdHsaCode parses the ELF in place via libelf (no full-buffer copy) and
+  // derives the canonical target-id from e_flags + the code object version,
+  // exactly as the loader does when matching against the agent ISA.
+  amd::hsa::code::AmdHsaCode code;
+  if (!code.InitAsBuffer(elf_data, elf_size)) {
+    return {};
+  }
+  std::string isa;
+  unsigned generic_version = 0;
+  if (!code.GetIsa(isa, &generic_version)) {
+    return {};
+  }
+  return isa;
+}
+
 namespace {
 
 bool IsAgentEligibleForHotswap(const AgentGfxRevision& gfx,
@@ -578,6 +770,136 @@ void LogRewrittenCodeObjectLoadFailure(hsa_status_t status) {
       "hotswap: rewritten load failed (status=%d), falling back to "
       "original code object\n",
       static_cast<int>(status));
+}
+
+// Run the COMGR retarget for a cache miss and populate both cache tiers.
+// Called by exactly one thread per key (single-flight winner). On success,
+// when the result was persisted to disk the in-memory tier stores only an
+// on-disk marker (no second heap copy) so other loads mmap the shared file.
+bool PerformRetargetAndCache(const CodeObjectView& code_object,
+                             const RewriteDecision& decision, uint64_t cache_key,
+                             const std::string& disk_cache_dir, uint64_t disk_cache_salt,
+                             OwnedElfBuffer* out_elf_buffer, size_t* out_elf_size) {
+  const bool rewritten = RetargetCodeObject(
+      code_object.data, code_object.size, decision.source_isa.c_str(),
+      decision.target_isa.c_str(), out_elf_buffer, out_elf_size,
+      decision.request_entry_trampolines);
+
+  bool persisted_to_disk = false;
+#if !defined(_WIN32) && !defined(_WIN64)
+  if (rewritten && !disk_cache_dir.empty()) {
+    persisted_to_disk = WriteDiskCache(disk_cache_dir, cache_key, disk_cache_salt,
+                                       (*out_elf_buffer).get(), *out_elf_size);
+    if (persisted_to_disk) {
+      HOTSWAP_LOG("hotswap: disk cache store src=%s tgt=%s in=%zu out=%zu\n",
+                  decision.source_isa.c_str(), decision.target_isa.c_str(), code_object.size,
+                  *out_elf_size);
+    }
+  }
+#else
+  (void)disk_cache_dir;
+  (void)disk_cache_salt;
+#endif
+
+  // In-memory tier. Only deterministic COMGR failures are cached; transient
+  // allocation failures are not, so a later attempt can still succeed.
+  try {
+    std::scoped_lock lock(g_retarget_cache_mutex);
+    if (g_retarget_cache.find(cache_key) == g_retarget_cache.end() &&
+        g_retarget_cache.size() < kMaxRetargetCacheEntries) {
+      CachedRetargetResult entry;
+      entry.succeeded = rewritten;
+      if (rewritten && persisted_to_disk) {
+        // Bytes live on disk; other loads mmap them zero-copy.
+        entry.on_disk = true;
+      } else if (rewritten) {
+        const auto* data = static_cast<const uint8_t*>((*out_elf_buffer).get());
+        entry.elf_bytes =
+            std::make_shared<std::vector<uint8_t>>(data, data + *out_elf_size);
+      }
+      g_retarget_cache.emplace(cache_key, std::move(entry));
+    }
+  } catch (const std::bad_alloc&) {
+    HOTSWAP_LOG("hotswap: retarget cache store skipped (out of memory); "
+                "returning uncached result for src=%s tgt=%s\n",
+                decision.source_isa.c_str(), decision.target_isa.c_str());
+  }
+
+  HOTSWAP_LOG("hotswap: rewrite src=%s tgt=%s entry_trampolines=%d in=%zu out=%zu changed=%d\n",
+              decision.source_isa.c_str(), decision.target_isa.c_str(),
+              decision.request_entry_trampolines, code_object.size,
+              rewritten ? *out_elf_size : 0, rewritten ? 1 : 0);
+  return rewritten;
+}
+
+#if !defined(_WIN32) && !defined(_WIN64)
+bool ReadWholeFile(const std::string& path, std::vector<uint8_t>* out) {
+  std::FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) {
+    return false;
+  }
+  bool ok = false;
+  if (std::fseek(f, 0, SEEK_END) == 0) {
+    const long len = std::ftell(f);
+    if (len > 0 && std::fseek(f, 0, SEEK_SET) == 0) {
+      try {
+        out->resize(static_cast<size_t>(len));
+        ok = std::fread(out->data(), 1, out->size(), f) == out->size();
+      } catch (const std::bad_alloc&) {
+        ok = false;
+      }
+    }
+  }
+  std::fclose(f);
+  return ok;
+}
+#endif
+
+// Warm the cache for a colon-separated list of code-object files named by the
+// HSA_HOTSWAP_PREWARM env var. Runs on a detached thread so the one-time COMGR
+// retarget is paid off the application critical path (e.g. at node bring-up).
+// The URI is reconstructed to match the runtime's file-URI form so keys line
+// up with the eventual real load; if they do not, single-flight and the disk
+// tier still prevent duplicate work within a run.
+void PrewarmFilesFromEnv(hsa_agent_t agent) {
+#if !defined(_WIN32) && !defined(_WIN64)
+  const std::string list = os::GetEnvVar("HSA_HOTSWAP_PREWARM");
+  size_t start = 0;
+  while (start <= list.size()) {
+    const size_t colon = list.find(':', start);
+    const size_t end = colon == std::string::npos ? list.size() : colon;
+    const std::string path = list.substr(start, end - start);
+    start = end + 1;
+    if (path.empty()) {
+      continue;
+    }
+    std::vector<uint8_t> bytes;
+    if (!ReadWholeFile(path, &bytes) || bytes.empty()) {
+      HOTSWAP_LOG("hotswap: prewarm skip (unreadable): %s\n", path.c_str());
+      continue;
+    }
+    const std::string uri = "file://" + path;
+    HOTSWAP_LOG("hotswap: prewarm %s (%zu bytes)\n", path.c_str(), bytes.size());
+    WarmHotswapCache(bytes.data(), bytes.size(), uri, agent);
+  }
+#else
+  (void)agent;
+#endif
+}
+
+void MaybeStartEnvPrewarm(hsa_agent_t agent) {
+  if (!os::IsEnvVarSet("HSA_HOTSWAP_PREWARM")) {
+    return;
+  }
+  static std::once_flag once;
+  std::call_once(once, [agent]() {
+    try {
+      std::thread(PrewarmFilesFromEnv, agent).detach();
+    } catch (const std::system_error&) {
+      // Thread creation failed; prewarming is best-effort, so fall back to the
+      // normal lazy retarget on first load.
+    }
+  });
 }
 
 }  // namespace
@@ -649,6 +971,89 @@ bool RetargetCodeObject(const void* elf_data, size_t elf_size, const char* sourc
   return true;
 }
 
+namespace {
+
+// Serve a cache key from the in-memory then disk tiers. Returns:
+//   kHitSuccess : *out_elf_buffer / *out_elf_size filled from cache.
+//   kHitFailed  : a prior deterministic COMGR failure is cached; skip rewrite.
+//   kMiss       : not cached; caller must retarget.
+enum class CacheProbe { kMiss, kHitSuccess, kHitFailed };
+
+CacheProbe ProbeRetargetCache(uint64_t cache_key, const RewriteDecision& decision,
+                              const CodeObjectView& code_object,
+                              const std::string& disk_cache_dir, uint64_t disk_cache_salt,
+                              OwnedElfBuffer* out_elf_buffer, size_t* out_elf_size) {
+  // In-memory tier.
+  std::shared_ptr<std::vector<uint8_t>> cached_bytes;
+  {
+    std::scoped_lock lock(g_retarget_cache_mutex);
+    auto it = g_retarget_cache.find(cache_key);
+    if (it != g_retarget_cache.end()) {
+      if (!it->second.succeeded) {
+        HOTSWAP_LOG("hotswap: cache hit (failed) src=%s tgt=%s entry_trampolines=%d in=%zu\n",
+                    decision.source_isa.c_str(), decision.target_isa.c_str(),
+                    decision.request_entry_trampolines, code_object.size);
+        return CacheProbe::kHitFailed;
+      }
+      // Succeeded: either bytes are in memory (disk off / memory-backed) or
+      // only on disk (fall through to the mmap tier below).
+      cached_bytes = it->second.elf_bytes;
+    }
+  }
+  if (cached_bytes) {
+    OwnedElfBuffer buf(std::malloc(cached_bytes->size()), &std::free);
+    if (buf) {
+      std::memcpy(buf.get(), cached_bytes->data(), cached_bytes->size());
+      *out_elf_buffer = std::move(buf);
+      *out_elf_size = cached_bytes->size();
+      HOTSWAP_LOG("hotswap: cache hit (success) src=%s tgt=%s entry_trampolines=%d in=%zu out=%zu\n",
+                  decision.source_isa.c_str(), decision.target_isa.c_str(),
+                  decision.request_entry_trampolines, code_object.size, cached_bytes->size());
+      return CacheProbe::kHitSuccess;
+    }
+  }
+
+#if !defined(_WIN32) && !defined(_WIN64)
+  // Disk tier: mmap the persisted ELF zero-copy. The OS shares the physical
+  // pages across every GPU load and every process mapping the same file.
+  if (!disk_cache_dir.empty()) {
+    const std::string disk_path = DiskCachePath(disk_cache_dir, cache_key, disk_cache_salt);
+    size_t mapped_size = 0;
+    OwnedElfBuffer mapped = MmapDiskCache(disk_path, disk_cache_salt, &mapped_size);
+    if (mapped) {
+      // Leave an on-disk marker so the remaining GPUs skip the in-memory copy
+      // and mmap the shared file too.
+      try {
+        std::scoped_lock lock(g_retarget_cache_mutex);
+        if (g_retarget_cache.find(cache_key) == g_retarget_cache.end() &&
+            g_retarget_cache.size() < kMaxRetargetCacheEntries) {
+          CachedRetargetResult entry;
+          entry.succeeded = true;
+          entry.on_disk = true;
+          g_retarget_cache.emplace(cache_key, std::move(entry));
+        }
+      } catch (const std::bad_alloc&) {
+        // Marker is best-effort; the mmap result is already returned.
+      }
+      *out_elf_buffer = std::move(mapped);
+      *out_elf_size = mapped_size;
+      HOTSWAP_LOG("hotswap: disk cache hit (mmap) src=%s tgt=%s entry_trampolines=%d in=%zu "
+                  "out=%zu\n",
+                  decision.source_isa.c_str(), decision.target_isa.c_str(),
+                  decision.request_entry_trampolines, code_object.size, mapped_size);
+      return CacheProbe::kHitSuccess;
+    }
+  }
+#else
+  (void)disk_cache_dir;
+  (void)disk_cache_salt;
+#endif
+
+  return CacheProbe::kMiss;
+}
+
+}  // namespace
+
 bool TryRetargetCodeObject(const CodeObjectView& code_object, hsa_agent_t agent,
                            OwnedElfBuffer* out_elf_buffer, size_t* out_elf_size) {
   if (IsHotswapDisabledByEnv() || !code_object.data || code_object.size == 0) {
@@ -661,7 +1066,13 @@ bool TryRetargetCodeObject(const CodeObjectView& code_object, hsa_agent_t agent,
     return false;
   }
 
-  const std::string source_isa = GetCodeObjectIsaName(code_object.data, code_object.size);
+  // Derive the source ISA straight from the ELF (no COMGR, no dlopen, no
+  // full-buffer copy). Only fall back to COMGR if the lightweight parse fails,
+  // which keeps COMGR entirely off the cache-hit path.
+  std::string source_isa = GetCodeObjectIsaNameFromElf(code_object.data, code_object.size);
+  if (source_isa.empty()) {
+    source_isa = GetCodeObjectIsaName(code_object.data, code_object.size);
+  }
   const std::string target_isa = GetAgentIsaName(agent);
   const std::optional<RewriteDecision> decision =
       DecideHotswapRewrite(gfx, source_isa, target_isa, options);
@@ -671,134 +1082,86 @@ bool TryRetargetCodeObject(const CodeObjectView& code_object, hsa_agent_t agent,
     return false;
   }
 
-  const uint64_t cache_key = ComputeRetargetCacheKey(
-      code_object.data, code_object.size, decision->source_isa,
-      decision->target_isa, decision->request_entry_trampolines);
+  // Best-effort bring-up warm-up now that a target agent is known; runs on a
+  // detached thread and never blocks this load.
+  MaybeStartEnvPrewarm(agent);
 
+  const uint64_t cache_key = ComputeRetargetCacheKeyFast(
+      code_object, decision->source_isa, decision->target_isa,
+      decision->request_entry_trampolines);
+
+  std::string disk_cache_dir;
+  uint64_t disk_cache_salt = 0ULL;
 #if !defined(_WIN32) && !defined(_WIN64)
-  const std::string disk_cache_dir = GetDiskCacheDir();
-  const uint64_t disk_cache_salt = disk_cache_dir.empty() ? 0ULL : ComgrIdentitySalt();
+  disk_cache_dir = GetDiskCacheDir();
+  disk_cache_salt = disk_cache_dir.empty() ? 0ULL : ComgrIdentitySalt();
 #endif
 
-  // Cache lookup: grab a shared_ptr under the lock, then copy outside it.
-  {
-    std::shared_ptr<std::vector<uint8_t>> cached_bytes;
-    bool cached_failed = false;
-
-    {
-      std::scoped_lock lock(g_retarget_cache_mutex);
-      auto it = g_retarget_cache.find(cache_key);
-      if (it != g_retarget_cache.end()) {
-        if (it->second.succeeded) {
-          cached_bytes = it->second.elf_bytes;
-        } else {
-          cached_failed = true;
-        }
-      }
+  // Probe the cache, then single-flight the miss so concurrent loads of the
+  // same object (e.g. one per GPU, or a prewarm thread) run COMGR only once.
+  // Losers wait and re-probe the now-populated cache.
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const CacheProbe probe = ProbeRetargetCache(cache_key, *decision, code_object,
+                                                disk_cache_dir, disk_cache_salt,
+                                                out_elf_buffer, out_elf_size);
+    if (probe == CacheProbe::kHitSuccess) {
+      return true;
     }
-
-    if (cached_failed) {
-      HOTSWAP_LOG("hotswap: cache hit (failed) src=%s tgt=%s entry_trampolines=%d in=%zu\n",
-                  decision->source_isa.c_str(), decision->target_isa.c_str(),
-                  decision->request_entry_trampolines, code_object.size);
+    if (probe == CacheProbe::kHitFailed) {
       return false;
     }
 
-    if (cached_bytes) {
-      OwnedElfBuffer buf(std::malloc(cached_bytes->size()), &std::free);
-      if (buf) {
-        std::memcpy(buf.get(), cached_bytes->data(), cached_bytes->size());
-        *out_elf_buffer = std::move(buf);
-        *out_elf_size = cached_bytes->size();
-        HOTSWAP_LOG("hotswap: cache hit (success) src=%s tgt=%s entry_trampolines=%d "
-                    "in=%zu out=%zu\n",
-                    decision->source_isa.c_str(), decision->target_isa.c_str(),
-                    decision->request_entry_trampolines, code_object.size,
-                    cached_bytes->size());
-        return true;
+    std::shared_ptr<InflightRetarget> inflight;
+    bool winner = false;
+    {
+      std::scoped_lock lock(g_inflight_mutex);
+      auto it = g_inflight.find(cache_key);
+      if (it == g_inflight.end()) {
+        inflight = std::make_shared<InflightRetarget>();
+        g_inflight.emplace(cache_key, inflight);
+        winner = true;
+      } else {
+        inflight = it->second;
       }
     }
-  }
 
-#if !defined(_WIN32) && !defined(_WIN64)
-  // Disk tier: another process (or a previous run) may have already persisted
-  // the retargeted ELF. On a hit, copy it out and promote it into the in-memory
-  // cache so the rest of this process avoids even the disk read.
-  if (!disk_cache_dir.empty()) {
-    const std::string disk_path = DiskCachePath(disk_cache_dir, cache_key, disk_cache_salt);
-    std::shared_ptr<std::vector<uint8_t>> disk_bytes = ReadDiskCache(disk_path, disk_cache_salt);
-    if (disk_bytes) {
-      OwnedElfBuffer buf(std::malloc(disk_bytes->size()), &std::free);
-      if (buf) {
-        std::memcpy(buf.get(), disk_bytes->data(), disk_bytes->size());
-        *out_elf_buffer = std::move(buf);
-        *out_elf_size = disk_bytes->size();
-        try {
-          std::scoped_lock lock(g_retarget_cache_mutex);
-          if (g_retarget_cache.find(cache_key) == g_retarget_cache.end() &&
-              g_retarget_cache.size() < kMaxRetargetCacheEntries) {
-            CachedRetargetResult entry;
-            entry.succeeded = true;
-            entry.elf_bytes = disk_bytes;
-            g_retarget_cache.emplace(cache_key, std::move(entry));
-          }
-        } catch (const std::bad_alloc&) {
-          // Promotion is best-effort; the disk result is already returned.
-        }
-        HOTSWAP_LOG("hotswap: disk cache hit src=%s tgt=%s entry_trampolines=%d in=%zu out=%zu\n",
-                    decision->source_isa.c_str(), decision->target_isa.c_str(),
-                    decision->request_entry_trampolines, code_object.size, disk_bytes->size());
-        return true;
+    if (winner) {
+      const bool rewritten = PerformRetargetAndCache(
+          code_object, *decision, cache_key, disk_cache_dir, disk_cache_salt,
+          out_elf_buffer, out_elf_size);
+      {
+        std::scoped_lock lock(g_inflight_mutex);
+        g_inflight.erase(cache_key);
       }
-    }
-  }
-#endif
-
-  const bool rewritten =
-      RetargetCodeObject(code_object.data, code_object.size,
-                         decision->source_isa.c_str(), decision->target_isa.c_str(),
-                         out_elf_buffer, out_elf_size,
-                         decision->request_entry_trampolines);
-
-  // Cache the result. Only deterministic COMGR failures are cached;
-  // transient allocation failures in this function are not, so a
-  // later attempt with the same code object can still succeed.
-  try {
-    std::scoped_lock lock(g_retarget_cache_mutex);
-    if (g_retarget_cache.size() < kMaxRetargetCacheEntries) {
-      CachedRetargetResult entry;
-      entry.succeeded = rewritten;
-      if (rewritten) {
-        const auto* data = static_cast<const uint8_t*>((*out_elf_buffer).get());
-        entry.elf_bytes = std::make_shared<std::vector<uint8_t>>(data, data + *out_elf_size);
+      {
+        std::lock_guard<std::mutex> lk(inflight->mutex);
+        inflight->done = true;
       }
-      g_retarget_cache.emplace(cache_key, std::move(entry));
+      inflight->cv.notify_all();
+      return rewritten;
     }
-  } catch (const std::bad_alloc&) {
-    // OOM during caching — the retarget result in out_elf_buffer is
-    // still valid, we just can't cache it for future loads.
-    HOTSWAP_LOG("hotswap: retarget cache store skipped (out of memory); "
-                "returning uncached result for src=%s tgt=%s\n",
-                decision->source_isa.c_str(), decision->target_isa.c_str());
+
+    // Loser: wait for the winner, then re-probe the cache on the next attempt.
+    std::unique_lock<std::mutex> lk(inflight->mutex);
+    inflight->cv.wait(lk, [&inflight]() { return inflight->done; });
   }
 
-#if !defined(_WIN32) && !defined(_WIN64)
-  // Persist a successful retarget so future launches (this or any process) can
-  // skip COMGR entirely. Best-effort: failures never affect the returned result.
-  if (rewritten && !disk_cache_dir.empty()) {
-    WriteDiskCache(disk_cache_dir, cache_key, disk_cache_salt, (*out_elf_buffer).get(),
-                   *out_elf_size);
-    HOTSWAP_LOG("hotswap: disk cache store src=%s tgt=%s in=%zu out=%zu\n",
-                decision->source_isa.c_str(), decision->target_isa.c_str(), code_object.size,
-                *out_elf_size);
-  }
-#endif
+  // Both attempts missed (e.g. the winner's result was not cacheable). Run the
+  // retarget directly to guarantee forward progress.
+  return PerformRetargetAndCache(code_object, *decision, cache_key, disk_cache_dir,
+                                 disk_cache_salt, out_elf_buffer, out_elf_size);
+}
 
-  HOTSWAP_LOG("hotswap: rewrite src=%s tgt=%s entry_trampolines=%d in=%zu out=%zu changed=%d\n",
-              decision->source_isa.c_str(), decision->target_isa.c_str(),
-              decision->request_entry_trampolines, code_object.size,
-              rewritten ? *out_elf_size : 0, rewritten ? 1 : 0);
-  return rewritten;
+bool WarmHotswapCache(const void* elf_data, size_t elf_size, const std::string& uri,
+                      hsa_agent_t agent) {
+  CodeObjectView code_object;
+  code_object.data = elf_data;
+  code_object.size = elf_size;
+  code_object.uri = uri;
+
+  OwnedElfBuffer buffer(nullptr, &std::free);
+  size_t size = 0;
+  return TryRetargetCodeObject(code_object, agent, &buffer, &size);
 }
 
 bool TryRetargetCodeObject(amd::hsa::loader::CodeObjectReaderImpl* reader, hsa_agent_t agent,

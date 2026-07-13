@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -22,9 +23,12 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #endif
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -613,5 +617,202 @@ TEST(HotswapRewrite, RetargetCacheClearResetsCacheSize) {
   rocr::hotswap::ClearRetargetCacheForTesting();
   EXPECT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), 0u);
 }
+
+// -- New coverage: COMGR-free ISA, cheap key, disk mmap, prewarm, dedupe ------
+
+// GetCodeObjectIsaNameFromElf derives the source ISA straight from the ELF
+// (no COMGR, no full-buffer copy), so it works even without the COMGR library.
+TEST(HotswapRewrite, GetIsaFromElfRealCodeObject) {
+  const std::string isa = rocr::hotswap::GetCodeObjectIsaNameFromElf(
+      kGfx1250MinCo, sizeof(kGfx1250MinCo));
+  EXPECT_EQ(isa, kGfx1250Isa);
+}
+
+TEST(HotswapRewrite, GetIsaFromElfInvalidCodeObject) {
+  const unsigned char fake_elf[] = {0x7f, 'E',  'L',  'F',  0x02, 0x01,
+                                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                    0x00, 0x00, 0x00, 0x00};
+  EXPECT_TRUE(rocr::hotswap::GetCodeObjectIsaNameFromElf(fake_elf, sizeof(fake_elf))
+                  .empty());
+  EXPECT_TRUE(rocr::hotswap::GetCodeObjectIsaNameFromElf(nullptr, 0).empty());
+}
+
+#if !defined(_WIN32) && !defined(_WIN64)
+namespace {
+
+std::string WriteTempCodeObject(const char* tag) {
+  std::string path = std::string("/tmp/hotswap_test_") + tag + "_" +
+                     std::to_string(::getpid()) + ".hsaco";
+  std::FILE* f = std::fopen(path.c_str(), "wb");
+  if (!f) return {};
+  std::fwrite(kGfx1250MinCo, 1, sizeof(kGfx1250MinCo), f);
+  std::fclose(f);
+  return path;
+}
+
+size_t CountCacheFilesRecursive(const std::string& dir);
+
+}  // namespace
+
+// A file-backed code object is keyed by (uri, file mtime, file size, object
+// size) without hashing the object, so a second load of the same file is
+// served from cache without growing it.
+TEST(HotswapRewrite, FileUriKeyServesSecondLoadFromCache) {
+  ResetRuntimeTestEnv();
+  if (!NewComgrHotswapApiAvailable()) return;
+  rocr::hotswap::ClearRetargetCacheForTesting();
+
+  const std::string path = WriteTempCodeObject("fileuri");
+  ASSERT_FALSE(path.empty());
+  rocr::hotswap::CodeObjectView code_object;
+  code_object.data = kGfx1250MinCo;
+  code_object.size = sizeof(kGfx1250MinCo);
+  code_object.uri = "file://" + path;
+
+  for (int i = 0; i < 2; ++i) {
+    LoadRecorder load;
+    const hsa_executable_t executable = MakeTestExecutable(0x610 + i);
+    const hsa_status_t status = rocr::hotswap::LoadAgentCodeObjectWithHotswap(
+        executable, MakeTestAgent(), code_object, nullptr, nullptr,
+        MakeLoadCallbacks(&load));
+    EXPECT_EQ(status, HSA_STATUS_SUCCESS);
+    ASSERT_EQ(load.calls.size(), 1u);
+    EXPECT_EQ(load.calls[0].path, LoadPath::kRewritten);
+    rocr::hotswap::ReleaseRetainedRewrittenElfBuffers(executable);
+  }
+
+  EXPECT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), 1u);
+  rocr::hotswap::ClearRetargetCacheForTesting();
+  ::remove(path.c_str());
+}
+
+// WarmHotswapCache populates the cache off the load path; the subsequent real
+// load of the same inputs is then served from cache (a hit, no new entry).
+TEST(HotswapRewrite, WarmHotswapCachePopulatesCacheForLoad) {
+  ResetRuntimeTestEnv();
+  if (!NewComgrHotswapApiAvailable()) return;
+  rocr::hotswap::ClearRetargetCacheForTesting();
+
+  const std::string uri = "memory://prewarm.hsaco";
+  ASSERT_TRUE(rocr::hotswap::WarmHotswapCache(kGfx1250MinCo, sizeof(kGfx1250MinCo),
+                                              uri, MakeTestAgent()));
+  const size_t after_warm = rocr::hotswap::RetargetCacheSizeForTesting();
+  EXPECT_EQ(after_warm, 1u);
+
+  LoadRecorder load;
+  rocr::hotswap::CodeObjectView code_object;
+  code_object.data = kGfx1250MinCo;
+  code_object.size = sizeof(kGfx1250MinCo);
+  code_object.uri = uri;
+  const hsa_executable_t executable = MakeTestExecutable(0x620);
+  const hsa_status_t status = rocr::hotswap::LoadAgentCodeObjectWithHotswap(
+      executable, MakeTestAgent(), code_object, nullptr, nullptr,
+      MakeLoadCallbacks(&load));
+
+  EXPECT_EQ(status, HSA_STATUS_SUCCESS);
+  ASSERT_EQ(load.calls.size(), 1u);
+  EXPECT_EQ(load.calls[0].path, LoadPath::kRewritten);
+  // Served from the warm-populated cache: no new entry.
+  EXPECT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), after_warm);
+  rocr::hotswap::ReleaseRetainedRewrittenElfBuffers(executable);
+  rocr::hotswap::ClearRetargetCacheForTesting();
+}
+
+// With a disk cache dir configured, a successful retarget is persisted to disk
+// and served zero-copy (mmap) on a later load even after the in-memory tier is
+// cleared -- the cross-process warm path.
+TEST(HotswapRewrite, DiskCachePersistsAndServesViaMmap) {
+  ResetRuntimeTestEnv();
+  if (!NewComgrHotswapApiAvailable()) return;
+  rocr::hotswap::ClearRetargetCacheForTesting();
+
+  const std::string cache_dir =
+      "/tmp/hotswap_test_cache_" + std::to_string(::getpid());
+  g_fake_env_vars["HSA_HOTSWAP_CACHE_DIR"] = cache_dir;
+
+  // First load: cache miss -> COMGR retarget -> persisted to disk.
+  {
+    LoadRecorder load;
+    const hsa_executable_t executable = MakeTestExecutable(0x630);
+    const hsa_status_t status = rocr::hotswap::LoadAgentCodeObjectWithHotswap(
+        executable, MakeTestAgent(), MakeRealCodeObjectView(), nullptr, nullptr,
+        MakeLoadCallbacks(&load));
+    EXPECT_EQ(status, HSA_STATUS_SUCCESS);
+    ASSERT_EQ(load.calls.size(), 1u);
+    EXPECT_EQ(load.calls[0].path, LoadPath::kRewritten);
+    rocr::hotswap::ReleaseRetainedRewrittenElfBuffers(executable);
+  }
+  EXPECT_GT(CountCacheFilesRecursive(cache_dir), 0u);
+
+  // Drop the in-memory tier so the next load must come from disk (mmap).
+  rocr::hotswap::ClearRetargetCacheForTesting();
+
+  {
+    LoadRecorder load;
+    const hsa_executable_t executable = MakeTestExecutable(0x631);
+    const hsa_status_t status = rocr::hotswap::LoadAgentCodeObjectWithHotswap(
+        executable, MakeTestAgent(), MakeRealCodeObjectView(), nullptr, nullptr,
+        MakeLoadCallbacks(&load));
+    EXPECT_EQ(status, HSA_STATUS_SUCCESS);
+    ASSERT_EQ(load.calls.size(), 1u);
+    EXPECT_EQ(load.calls[0].path, LoadPath::kRewritten);
+    EXPECT_GT(load.calls[0].code_object_size, 0u);
+    rocr::hotswap::ReleaseRetainedRewrittenElfBuffers(executable);
+  }
+
+  rocr::hotswap::ClearRetargetCacheForTesting();
+  // Best-effort cleanup of the temp cache tree.
+  std::string cmd = "rm -rf '" + cache_dir + "'";
+  (void)std::system(cmd.c_str());
+}
+
+// Concurrent loads of the same object coalesce: single-flight runs COMGR once
+// and leaves exactly one cache entry, with all loads succeeding.
+TEST(HotswapRewrite, ConcurrentLoadsRetargetOnce) {
+  ResetRuntimeTestEnv();
+  if (!NewComgrHotswapApiAvailable()) return;
+  rocr::hotswap::ClearRetargetCacheForTesting();
+
+  constexpr int kThreads = 8;
+  std::atomic<int> successes{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < kThreads; ++i) {
+    threads.emplace_back([i, &successes]() {
+      LoadRecorder load;
+      const hsa_executable_t executable = MakeTestExecutable(0x640 + i);
+      const hsa_status_t status = rocr::hotswap::LoadAgentCodeObjectWithHotswap(
+          executable, MakeTestAgent(), MakeRealCodeObjectView(), nullptr,
+          nullptr, MakeLoadCallbacks(&load));
+      if (status == HSA_STATUS_SUCCESS && load.calls.size() == 1u &&
+          load.calls[0].path == LoadPath::kRewritten) {
+        successes.fetch_add(1);
+      }
+      rocr::hotswap::ReleaseRetainedRewrittenElfBuffers(executable);
+    });
+  }
+  for (auto& t : threads) t.join();
+
+  EXPECT_EQ(successes.load(), kThreads);
+  EXPECT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), 1u);
+  rocr::hotswap::ClearRetargetCacheForTesting();
+}
+
+namespace {
+
+size_t CountCacheFilesRecursive(const std::string& dir) {
+  // Cheap recursive count via the shell; the test only needs "at least one".
+  const std::string cmd =
+      "find '" + dir + "' -type f -name '*.co' 2>/dev/null | wc -l";
+  std::FILE* p = ::popen(cmd.c_str(), "r");
+  if (!p) return 0;
+  char buf[32] = {};
+  const size_t n = std::fread(buf, 1, sizeof(buf) - 1, p);
+  ::pclose(p);
+  if (n == 0) return 0;
+  return static_cast<size_t>(std::strtoul(buf, nullptr, 10));
+}
+
+}  // namespace
+#endif  // !_WIN32 && !_WIN64
 
 }  // namespace
