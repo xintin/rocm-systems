@@ -134,7 +134,20 @@ hsa_status_t hsa_agent_get_info(hsa_agent_t /*agent*/,
     *static_cast<uint32_t*>(value) = g_fake_hsa_env.asic_revision;
     return HSA_STATUS_SUCCESS;
   }
+  if (attribute == HSA_AGENT_INFO_DEVICE) {
+    *static_cast<hsa_device_type_t*>(value) = HSA_DEVICE_TYPE_GPU;
+    return HSA_STATUS_SUCCESS;
+  }
   return HSA_STATUS_ERROR;
+}
+
+hsa_status_t hsa_iterate_agents(hsa_status_t (*callback)(hsa_agent_t agent,
+                                                         void* data),
+                                void* data) {
+  hsa_agent_t agent{};
+  agent.handle = 1;
+  const hsa_status_t status = callback(agent, data);
+  return status == HSA_STATUS_INFO_BREAK ? HSA_STATUS_SUCCESS : status;
 }
 
 }  // namespace HSA
@@ -616,6 +629,42 @@ TEST(HotswapRewrite, RetargetCacheClearResetsCacheSize) {
   EXPECT_GT(rocr::hotswap::RetargetCacheSizeForTesting(), 0u);
   rocr::hotswap::ClearRetargetCacheForTesting();
   EXPECT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), 0u);
+}
+
+// Exported C entry point used by HIP/CLR to prewarm the cache at init time.
+extern "C" hsa_status_t hsa_amd_hotswap_prewarm_code_object(const void* code_object,
+                                                            size_t code_object_size);
+
+// The prewarm export selects an eligible agent, runs the retarget into the
+// process cache, and a subsequent real load of the same object is a cache hit.
+TEST(HotswapPrewarm, ExportPopulatesRetargetCache) {
+  ResetRuntimeTestEnv();
+  if (!NewComgrHotswapApiAvailable()) return;
+  rocr::hotswap::ClearRetargetCacheForTesting();
+  ASSERT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), 0u);
+
+  EXPECT_EQ(hsa_amd_hotswap_prewarm_code_object(kGfx1250MinCo, sizeof(kGfx1250MinCo)),
+            HSA_STATUS_SUCCESS);
+  const size_t warmed = rocr::hotswap::RetargetCacheSizeForTesting();
+  EXPECT_GT(warmed, 0u);
+
+  LoadRecorder load;
+  const hsa_executable_t executable = MakeTestExecutable(0x801);
+  const hsa_status_t status = rocr::hotswap::LoadAgentCodeObjectWithHotswap(
+      executable, MakeTestAgent(), MakeRealCodeObjectView(), nullptr, nullptr,
+      MakeLoadCallbacks(&load));
+  EXPECT_EQ(status, HSA_STATUS_SUCCESS);
+  ASSERT_EQ(load.calls.size(), 1u);
+  EXPECT_EQ(load.calls[0].path, LoadPath::kRewritten);
+  // Served from the prewarmed cache: no new entry.
+  EXPECT_EQ(rocr::hotswap::RetargetCacheSizeForTesting(), warmed);
+  rocr::hotswap::ReleaseRetainedRewrittenElfBuffers(executable);
+  rocr::hotswap::ClearRetargetCacheForTesting();
+}
+
+TEST(HotswapPrewarm, ExportRejectsInvalidArgs) {
+  EXPECT_EQ(hsa_amd_hotswap_prewarm_code_object(nullptr, 0),
+            HSA_STATUS_ERROR_INVALID_ARGUMENT);
 }
 
 // -- New coverage: COMGR-free ISA, cheap key, disk mmap, prewarm, dedupe ------

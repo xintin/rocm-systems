@@ -191,6 +191,13 @@ class StatCO : public CodeObject {
   // Iterate all registered fat binary data pointers — for HRR capture post-registration sweep.
   void ForEachFatBinaryBlob(void (*cb)(const void*)) const;
 
+  // Digest every registered fat binary now (idempotent), so their code objects
+  // are extracted early. Combined with the HIP_HOTSWAP_PREWARM hook in
+  // AddDevProgram this warms the ROCr hotswap cache off the first-launch
+  // critical path. The expensive retarget runs on a detached thread, so this
+  // never holds sclock_ across it.
+  void PrewarmRegisteredFatBinaries();
+
  private:
   mutable std::recursive_mutex sclock_;    //!< Guards Static Code object
   const PlatformState& owner_;             //!< Reference to owning PlatformState

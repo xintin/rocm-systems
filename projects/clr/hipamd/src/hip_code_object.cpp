@@ -673,4 +673,29 @@ void StatCO::ForEachFatBinaryBlob(void (*cb)(const void*)) const {
     cb(data);
   }
 }
+
+void StatCO::PrewarmRegisteredFatBinaries() {
+  // Snapshot keys under the lock, then digest each one outside a single held
+  // lock. DigestFatBinary is idempotent (returns early once the FatBinaryInfo
+  // exists) and extracts under sclock_ per call; the expensive B0->A0 retarget
+  // it triggers via AddDevProgram runs on a detached thread, so sclock_ is only
+  // held for the (fast) bundle extraction, never across the retarget.
+  std::vector<const void*> keys;
+  {
+    std::scoped_lock lock(sclock_);
+    keys.reserve(modules_.size());
+    for (const auto& [data, _] : modules_) {
+      keys.push_back(data);
+    }
+  }
+  for (const void* data : keys) {
+    std::scoped_lock lock(sclock_);
+    auto it = modules_.find(data);
+    if (it == modules_.end()) {
+      continue;
+    }
+    // Ignore the status: prewarm is best-effort and must not affect the app.
+    (void)DigestFatBinary(data, it->second);
+  }
+}
 }  // namespace hip

@@ -281,6 +281,7 @@ global:
 	hsa_amd_signal_get_event_id;
 	hsa_amd_vmem_export_fabric_handle;
 	hsa_amd_vmem_import_fabric_handle;
+	hsa_amd_hotswap_prewarm_code_object;
 local:
     *;
 };

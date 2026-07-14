@@ -7,6 +7,9 @@
 #include "hip/hip_runtime_api.h"
 #include "hip_fatbin.hpp"
 #include "hip_global.hpp"
+#include <cstdlib>
+#include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <mutex>
 #include "hip_code_object.hpp"
@@ -20,7 +23,45 @@
 #include <rocm_kpack/kpack.h>
 #endif
 
+// Optional ROCr hotswap prewarm entry point. Weak so HIP still loads against an
+// older runtime that does not export it (the pointer is then null). Declared
+// with C linkage and int return (hsa_status_t is an int-sized enum) to avoid
+// pulling HSA headers into this TU.
+extern "C" __attribute__((weak)) int hsa_amd_hotswap_prewarm_code_object(
+    const void* code_object, size_t code_object_size);
+
 namespace hip {
+
+namespace {
+// Opt-in init-time hotswap prewarm, gated by HIP_HOTSWAP_PREWARM (truthy).
+bool HotswapPrewarmEnabled() {
+  static const bool enabled = []() {
+    const char* v = getenv("HIP_HOTSWAP_PREWARM");
+    return v != nullptr && v[0] != '\0' && v[0] != '0';
+  }();
+  return enabled;
+}
+
+// Fire-and-forget: warm the ROCr hotswap retarget cache for these code-object
+// bytes on a detached thread, so the (expensive) B0->A0 retarget runs off the
+// StatCO lock and off the first-launch critical path. The cache's single-flight
+// coalescing dedups this against the real load and against sibling per-GPU
+// calls. The bytes belong to the long-lived FatBinaryInfo image, so they stay
+// valid for the retarget's duration.
+void MaybePrewarmHotswap(const void* binary_image, size_t binary_size) {
+  using PrewarmFn = int (*)(const void*, size_t);
+  PrewarmFn fn = hsa_amd_hotswap_prewarm_code_object;  // null if runtime lacks it
+  if (fn == nullptr || !HotswapPrewarmEnabled() || binary_image == nullptr ||
+      binary_size == 0) {
+    return;
+  }
+  try {
+    std::thread([fn, binary_image, binary_size]() { fn(binary_image, binary_size); }).detach();
+  } catch (const std::system_error&) {
+    // Best-effort; fall back to the normal lazy retarget at load time.
+  }
+}
+}  // namespace
 // Use ComgrUniqueHandle and type aliases from hip_comgr_helper.hpp
 using comgr_helper::ComgrDataSetUniqueHandle;
 using comgr_helper::ComgrActionInfoUniqueHandle;
@@ -803,6 +844,12 @@ hipError_t FatBinaryInfo::AddDevProgram(hip::Device* device, const void* binary_
     if (out_fdesc != amd::Os::FDescInit()) amd::Os::CloseFileHandle(out_fdesc);
     return hipErrorInvalidKernelFile;
   }
+
+  // Opt-in: prewarm the ROCr hotswap retarget cache for these exact code-object
+  // bytes off the critical path, so the eventual agent load hits the cache
+  // instead of paying the B0->A0 retarget. No-op unless HIP_HOTSWAP_PREWARM is
+  // set and the runtime exports the entry point.
+  MaybePrewarmHotswap(binary_image, binary_size);
   return hipSuccess;
 }
 

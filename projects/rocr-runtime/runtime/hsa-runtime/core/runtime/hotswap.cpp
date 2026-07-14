@@ -73,6 +73,7 @@
 
 #include "core/inc/amd_hsa_code.hpp"
 #include "core/inc/hotswap_gfx_query.hpp"
+#include "core/inc/hsa_internal.h"
 #include "core/util/os.h"
 
 namespace rocr {
@@ -1253,3 +1254,51 @@ void ClearRetargetCacheForTesting() {
 
 }  // namespace hotswap
 }  // namespace rocr
+
+// Exported C entry point so higher layers (e.g. HIP/CLR) can pre-warm the
+// hotswap retarget cache for a code object at init time, off the first-launch
+// critical path. Runs the retarget and populates the process-global in-memory
+// and disk caches without loading the object onto a device; the subsequent real
+// agent load then hits the cache. The caller passes only the code object bytes;
+// this picks an eligible (gfx12.5) GPU agent to drive the retarget decision, so
+// the retarget matches what the real load computes. The URI is left empty so
+// the cache key is content-based, matching the key the real (memory-backed)
+// load computes for the same extracted bytes. Best-effort and fire-and-forget:
+// returns SUCCESS with no cache change when no eligible agent exists.
+extern "C" hsa_status_t HSA_API hsa_amd_hotswap_prewarm_code_object(
+    const void* code_object, size_t code_object_size) {
+  if (!code_object || code_object_size == 0) {
+    return HSA_STATUS_ERROR_INVALID_ARGUMENT;
+  }
+
+  // Select the first hotswap-eligible GPU agent to drive the retarget decision.
+  struct Selection {
+    hsa_agent_t agent{};
+    bool found = false;
+  } selection;
+  rocr::HSA::hsa_iterate_agents(
+      [](hsa_agent_t agent, void* data) -> hsa_status_t {
+        auto* sel = static_cast<Selection*>(data);
+        hsa_device_type_t type;
+        if (rocr::HSA::hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &type) !=
+                HSA_STATUS_SUCCESS ||
+            type != HSA_DEVICE_TYPE_GPU) {
+          return HSA_STATUS_SUCCESS;
+        }
+        if (rocr::hotswap::IsGfx12_5Target(
+                rocr::hotswap::GetAgentGfxRevision(agent).gfx_target)) {
+          sel->agent = agent;
+          sel->found = true;
+          return HSA_STATUS_INFO_BREAK;
+        }
+        return HSA_STATUS_SUCCESS;
+      },
+      &selection);
+  if (!selection.found) {
+    return HSA_STATUS_SUCCESS;
+  }
+
+  (void)rocr::hotswap::WarmHotswapCache(code_object, code_object_size, std::string(),
+                                        selection.agent);
+  return HSA_STATUS_SUCCESS;
+}

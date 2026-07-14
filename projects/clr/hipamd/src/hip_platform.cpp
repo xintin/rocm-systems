@@ -17,6 +17,9 @@
 #include <mutex>
 #include <limits>
 #include <cmath>
+#include <cstdlib>
+#include <system_error>
+#include <thread>
 
 namespace hip_impl {
 // ================================================================================================
@@ -1029,6 +1032,22 @@ void PlatformState::Init() {
   amd::RuntimeTearDown::RegisterTearDownCallback("PlatformState static fatbin cleanup", [this]() {
     statCO_.RemoveAllFatBinaries();
   });
+
+  // Opt-in (HIP_HOTSWAP_PREWARM): digest all registered fat binaries now on a
+  // detached background thread so the gfx1250 B0->A0 hotswap retarget runs off
+  // the first-launch critical path and warms the ROCr cache. Best-effort; any
+  // failure just leaves the normal lazy retarget in place.
+  static const bool prewarm = []() {
+    const char* v = getenv("HIP_HOTSWAP_PREWARM");
+    return v != nullptr && v[0] != '\0' && v[0] != '0';
+  }();
+  if (prewarm) {
+    try {
+      std::thread([this]() { statCO_.PrewarmRegisteredFatBinaries(); }).detach();
+    } catch (const std::system_error&) {
+      // Best-effort; fall back to lazy retarget at first launch.
+    }
+  }
 }
 
 // ================================================================================================
